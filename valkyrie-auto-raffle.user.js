@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Valkyrie Auto-Raffle (Stake → Valkyrie Studio)
 // @namespace    oracle-labs.valkyrie
-// @version      1.2.1
+// @version      1.3.0
 // @description  Capture les bets de ta session Stake et, quand le jeu + le multiplicateur correspondent à une raffle Valkyrie Studio, envoie automatiquement le bet dans la raffle.
 // @author       Oracle Labs
 // @match        https://stake.com/*
@@ -40,7 +40,10 @@
   const SUBMIT_DELAY_MS = 450;
   const RAFFLE_REFRESH_MS = 60000;
   const ONLY_VALKYRIE_GAMES = true; // ne traiter que les bets dont le jeu a une raffle active
+  const ONLY_OWN_BETS = true;       // ne traiter que TES bets (ignore ceux des autres joueurs vus dans les feeds)
   const NOTIFY_ON_ENTRY = true;     // notif navigateur + son quand un bet est ENTRÉ
+  // Champs présents uniquement sur TON user (pas sur les users publics des feeds) : sert à détecter ton compte.
+  const SELF_MARKERS = ["email", "balances", "vaultBalances", "vaultBalance", "kycStatus", "mfaEnabled", "hasVerifiedEmail", "activeClientSeed", "sessionCount"];
   const LOG_PREFIX = "[Valkyrie AR]";
   const SENT_STORE_KEY = "valk_sent_pairs_v1";
   const ENTRY_LOG_KEY = "valk_entries_v1";
@@ -55,8 +58,9 @@
   let queueRunning = false;
   let paused = false;
   let currentGame = null;
+  let myUsername = null; // détecté depuis ta session ; null = pas encore connu (on ne filtre pas)
 
-  const stats = { payloads: 0, captured: 0, matched: 0, sent: 0, conflict: 0, failed: 0 };
+  const stats = { payloads: 0, captured: 0, matched: 0, sent: 0, conflict: 0, failed: 0, foreign: 0 };
 
   let sentPairs = new Set();
   try { sentPairs = new Set(JSON.parse(GM_getValue(SENT_STORE_KEY, "[]"))); } catch (e) { sentPairs = new Set(); }
@@ -134,6 +138,25 @@
     return null;
   }
 
+  // Détecte TON compte : cherche un objet "user" qui porte des champs privés (solde, email…)
+  // que seul ton propre user expose — jamais les users publics affichés dans les feeds.
+  function detectSelf(node, depth) {
+    if (!node || typeof node !== "object" || depth > 7) return null;
+    if (Array.isArray(node)) {
+      for (const it of node) { const s = detectSelf(it, depth + 1); if (s) return s; }
+      return null;
+    }
+    const hasMarker = SELF_MARKERS.some((m) => m in node);
+    if (hasMarker && typeof node.name === "string" && node.name) return node.name;
+    if (node.user && typeof node.user === "object" && typeof node.user.name === "string" &&
+        SELF_MARKERS.some((m) => m in node.user)) return node.user.name;
+    for (const k in node) {
+      const v = node[k];
+      if (v && typeof v === "object") { const s = detectSelf(v, depth + 1); if (s) return s; }
+    }
+    return null;
+  }
+
   function looksLikeBetId(v) { return typeof v === "string" && /^(casino|sports|house|ext|sport):/i.test(v); }
 
   function pickBetInput(node, parent) {
@@ -162,9 +185,13 @@
         (node.game && (node.game.name || node.game.title || node.game.slug)) ||
         node.gameName || node.gameTitle || (typeof node.game === "string" ? node.game : null);
       const uuid = String(node.id != null ? node.id : node.iid != null ? node.iid : node.betId);
+      const user =
+        (node.user && (node.user.name || node.user.username)) ||
+        node.username || (parent && parent.user && (parent.user.name || parent.user.username)) || null;
       out.push({
         id: uuid,
         betInput: pickBetInput(node, parent) || uuid,
+        user: user ? String(user) : null,
         game: game ? String(game) : null,
         multiplier: Number(mult),
         amount: node.amount != null ? Number(node.amount) : null,
@@ -179,6 +206,11 @@
 
   function processPayload(obj, url) {
     if (!obj || typeof obj !== "object") return;
+
+    if (!myUsername) {
+      const self = detectSelf(obj, 0);
+      if (self) { myUsername = self; log(`👤 Compte détecté : ${myUsername} — seuls tes bets seront traités.`); updatePanel(); }
+    }
 
     const g = findGameContext(obj, 0);
     // On ne suit le "jeu courant" que pour les jeux Valkyrie (ceux ayant une raffle) :
@@ -212,6 +244,14 @@
     // (pas de garde sur targetGames.size : tant que les raffles ne sont pas chargées,
     //  rien n'est envoyable de toute façon, donc on peut ignorer sans risque.)
     if (ONLY_VALKYRIE_GAMES && !isTargetGame(bet.game)) return;
+
+    // Filtre "tes bets uniquement" : on ignore les bets attribués à un autre joueur
+    // (vus dans les feeds). Tant que ton compte n'est pas connu, on ne bloque rien.
+    if (ONLY_OWN_BETS && myUsername && bet.user && norm(bet.user) !== norm(myUsername)) {
+      stats.foreign++;
+      updatePanel();
+      return;
+    }
 
     const prev = seenBets.get(bet.id);
     const isNew = !prev;
@@ -431,12 +471,14 @@
       <div class="vbody">
         <div class="vgrid">
           <span>Raffles actives</span><b data-k="raffles">—</b>
+          <span>Ton compte</span><b data-k="me">—</b>
           <span>Jeu courant</span><b data-k="game">—</b>
-          <span>Flux capté</span><b data-k="payloads">0</b>
+          <span>Trafic réseau</span><b data-k="payloads">0</b>
           <span>Bets capturés</span><b data-k="captured">0</b>
           <span>Correspondances</span><b data-k="matched">0</b>
           <span>Entrés ✅</span><b data-k="entered">0</b>
           <span>Refusés ⛔</span><b data-k="refused">0</b>
+          <span>Autres joueurs ⊘</span><b data-k="foreign">0</b>
         </div>
         <div class="vsec">
           <div class="vlabel">🎯 Sur ce jeu, tu vises :</div>
@@ -476,7 +518,7 @@
     });
     panelEl.querySelector('[data-act="reset"]').addEventListener("click", () => {
       stats.payloads = 0; stats.captured = 0; stats.matched = 0;
-      stats.sent = 0; stats.conflict = 0; stats.failed = 0;
+      stats.sent = 0; stats.conflict = 0; stats.failed = 0; stats.foreign = 0;
       updatePanel();
       log("↺ Stats remises à zéro.");
     });
@@ -593,12 +635,14 @@
     if (!panelEl) return;
     const set = (k, v) => { const n = panelEl.querySelector(`[data-k="${k}"]`); if (n) n.textContent = v; };
     set("raffles", activeRaffles.length || "—");
+    set("me", myUsername || "—");
     set("game", currentGame && currentGame.name ? currentGame.name : "—");
     set("payloads", stats.payloads);
     set("captured", stats.captured);
     set("matched", stats.matched);
     set("entered", stats.sent + stats.conflict);
     set("refused", stats.failed);
+    set("foreign", stats.foreign);
   }
 
   function log(msg) {
