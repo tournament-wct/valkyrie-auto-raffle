@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Valkyrie Auto-Raffle (Stake → Valkyrie Studio)
 // @namespace    oracle-labs.valkyrie
-// @version      1.6.0
+// @version      1.7.0
 // @description  Capture les bets de ta session Stake et, quand le jeu + le multiplicateur correspondent à une raffle Valkyrie Studio, envoie automatiquement le bet dans la raffle.
 // @author       Oracle Labs
 // @match        https://stake.com/*
@@ -66,6 +66,29 @@
   try { const v = GM_getValue("valk_notif_vol", 1); if (typeof v === "number") notifVolume = v; } catch (e) {}
   function volIcon(v) { return v >= 1 ? "🔊" : v > 0 ? "🔉" : "🔇"; }
 
+  let enabled = true;
+  try { enabled = GM_getValue("valk_enabled", true) !== false; } catch (e) {}
+  let viewFilter = null; // null = jeux actifs ; sinon nom normalisé d'un jeu à afficher
+
+  let life = { entered: 0, refused: 0, reasons: { miseBasse: 0, mauvaisJeu: 0, timing: 0, autre: 0 } };
+  try {
+    const l = GM_getValue("valk_life", null);
+    if (l && typeof l === "object") {
+      life.entered = l.entered || 0; life.refused = l.refused || 0;
+      if (l.reasons) for (const k in life.reasons) life.reasons[k] = l.reasons[k] || 0;
+    }
+  } catch (e) {}
+  function saveLife() { try { GM_setValue("valk_life", life); } catch (e) {} }
+
+  // Range un motif de refus dans une catégorie lisible.
+  function categorizeRefusal(reason) {
+    const s = String(reason || "").toLowerCase();
+    if (/at least|needs at least|too small|too low|minimum|\bmise\b/.test(s)) return "miseBasse";
+    if (/isn'?t on|not on|wrong game|pas sur/.test(s)) return "mauvaisJeu";
+    if (/ended|expired|closed|not started|window|too late|too early|no longer|has ended/.test(s)) return "timing";
+    return "autre";
+  }
+
   const stats = { payloads: 0, captured: 0, matched: 0, sent: 0, conflict: 0, failed: 0, foreign: 0 };
 
   let sentPairs = new Set();
@@ -115,6 +138,7 @@
       updatePanel();
       renderHunting();
       populateManualRaffles();
+      populateViewMenu();
     } catch (e) {
       log("⚠️ Impossible de charger les raffles Valkyrie : " + (e.message || e));
     }
@@ -308,6 +332,7 @@
   }
 
   function considerBet(bet) {
+    if (!enabled) return; // interrupteur persistant OFF : on ne soumet rien
     for (const raffle of activeRaffles) {
       if (!matchesRaffle(bet, raffle)) continue;
       const key = bet.id + "|" + raffle.id;
@@ -347,6 +372,7 @@
 
       if (okStatus && !bodySaysFail) {
         stats.sent++; rememberPair(key);
+        life.entered++; saveLife();
         log(`✅ ENTRÉ dans ${tag}`);
         recordEntry({ t: Date.now(), betInput: input, raffle: raffle.name, game: bet.game, multi: bet.multiplier, status: "entré" });
         notifyEntry(bet, raffle);
@@ -355,6 +381,8 @@
         log(`↔️ Déjà tenté ${tag}${reason ? " : " + reason : ""}`);
       } else {
         stats.failed++;
+        const cat = categorizeRefusal(reason);
+        life.refused++; life.reasons[cat] = (life.reasons[cat] || 0) + 1; saveLife();
         // Un refus définitif (mise trop basse, mauvais jeu…) ne changera pas : on mémorise la
         // paire pour ne pas re-marteler Valkyrie si le même bet réapparaît. On ne mémorise PAS
         // les erreurs serveur (5xx) ni réseau, qui elles peuvent être transitoires.
@@ -482,6 +510,10 @@
         padding:9px 11px;background:#1b1712;border-bottom:1px solid #33291f;cursor:move}
       #valk-panel .vh b{color:#e0a86b;font-weight:600;letter-spacing:.3px}
       #valk-panel .vh .vx{cursor:pointer;color:#8a7c6a;padding:0 4px}
+      #valk-panel .vhctrl{display:flex;align-items:center;gap:2px}
+      #valk-panel .vpow{cursor:pointer;color:#7fdca8;padding:0 4px;font-weight:700}
+      #valk-panel .vpow.off{color:#8a7c6a}
+      #valk-panel.disabled .vh b::after{content:" · OFF";color:#e07a5f;font-weight:600}
       #valk-panel .vbody{padding:10px 11px;cursor:move}
       #valk-panel input,#valk-panel select,#valk-panel .vlog,#valk-panel .vhist{cursor:auto}
       #valk-panel{user-select:none}
@@ -513,7 +545,7 @@
     panelEl = document.createElement("div");
     panelEl.id = "valk-panel";
     panelEl.innerHTML = `
-      <div class="vh"><b>🏴‍☠️ Valkyrie Auto-Raffle</b><span class="vx" title="réduire">—</span></div>
+      <div class="vh"><b>🏴‍☠️ Valkyrie Auto-Raffle</b><span class="vhctrl"><span class="vpow" data-act="power" title="Activer / désactiver">⏻</span><span class="vx" title="réduire">—</span></span></div>
       <div class="vbody">
         <div class="vgrid">
           <span>Raffles actives</span><b data-k="raffles">—</b>
@@ -527,6 +559,7 @@
           <span>Autres joueurs ⊘</span><b data-k="foreign">0</b>
         </div>
         <div class="vsec">
+          <select class="vsel" id="valk-view" style="margin-bottom:6px"><option value="">Voir : jeux actifs</option></select>
           <div class="vlabel">🎯 Sur ce jeu, tu vises :</div>
           <div class="vhunt" id="valk-hunt"><span class="miss">—</span></div>
         </div>
@@ -537,8 +570,9 @@
           <button class="vbtn vbtn-icon" data-act="vol" title="Volume des notifications">🔊</button>
         </div>
         <div class="vrow">
-          <button class="vbtn" data-act="manual">✍️ Saisie manuelle</button>
+          <button class="vbtn" data-act="manual">✍️ Manuel</button>
           <button class="vbtn" data-act="history">📋 Historique</button>
+          <button class="vbtn" data-act="life">📈 À vie</button>
         </div>
         <div class="vpanel" id="valk-manual" hidden>
           <input id="valk-manual-id" placeholder="colle un bet id (ex: casino:123…)" />
@@ -549,6 +583,10 @@
         <div class="vpanel" id="valk-history" hidden>
           <div class="vhist" id="valk-hist-list"></div>
           <button class="vbtn" data-act="export" style="width:100%;margin-top:6px">📤 Exporter (presse-papier)</button>
+        </div>
+        <div class="vpanel" id="valk-life" hidden>
+          <div id="valk-life-body" class="vmini"></div>
+          <button class="vbtn" data-act="life-reset" style="width:100%;margin-top:6px">↺ Remettre à zéro (à vie)</button>
         </div>
       </div>`;
     document.body.appendChild(panelEl);
@@ -589,10 +627,76 @@
     panelEl.querySelector('[data-act="manual-send"]').addEventListener("click", manualSend);
     panelEl.querySelector('[data-act="export"]').addEventListener("click", exportEntries);
 
+    // Interrupteur on/off persistant
+    panelEl.querySelector('[data-act="power"]').addEventListener("click", () => {
+      enabled = !enabled;
+      try { GM_setValue("valk_enabled", enabled); } catch (e) {}
+      applyEnabled();
+      log(enabled ? "▶ Script activé." : "■ Script désactivé (reste OFF après reload).");
+      if (enabled) runQueue();
+    });
+
+    // Menu « Voir » : filtre l'affichage sur un jeu précis
+    panelEl.querySelector("#valk-view").addEventListener("change", (e) => {
+      viewFilter = e.target.value || null;
+      renderHunting();
+    });
+
+    // Stats à vie
+    panelEl.querySelector('[data-act="life"]').addEventListener("click", () => {
+      const p = panelEl.querySelector("#valk-life"); p.hidden = !p.hidden;
+      if (!p.hidden) renderLife();
+    });
+    panelEl.querySelector('[data-act="life-reset"]').addEventListener("click", () => {
+      life = { entered: 0, refused: 0, reasons: { miseBasse: 0, mauvaisJeu: 0, timing: 0, autre: 0 } };
+      saveLife(); renderLife();
+    });
+
+    // Restaure la position mémorisée
+    try {
+      const p = GM_getValue("valk_pos", null);
+      if (p && p.left && p.top) { panelEl.style.left = p.left; panelEl.style.top = p.top; panelEl.style.right = "auto"; panelEl.style.bottom = "auto"; }
+    } catch (e) {}
+
     makeDraggable(panelEl, panelEl);
     populateManualRaffles();
+    populateViewMenu();
+    applyEnabled();
     renderHunting();
     updatePanel();
+  }
+
+  function applyEnabled() {
+    if (!panelEl) return;
+    panelEl.classList.toggle("disabled", !enabled);
+    const p = panelEl.querySelector('[data-act="power"]');
+    if (p) { p.classList.toggle("off", !enabled); p.title = enabled ? "Actif — cliquer pour désactiver" : "Désactivé — cliquer pour activer"; }
+  }
+
+  function populateViewMenu() {
+    if (!panelEl) return;
+    const sel = panelEl.querySelector("#valk-view");
+    if (!sel) return;
+    const cur = sel.value;
+    const names = [...new Set(activeRaffles.map((r) => r.gameName).filter(Boolean))];
+    sel.innerHTML = `<option value="">Voir : jeux actifs</option>` +
+      names.map((n) => `<option value="${norm(n)}">${n}</option>`).join("");
+    if (cur && names.some((n) => norm(n) === cur)) sel.value = cur;
+    else { sel.value = ""; viewFilter = null; }
+  }
+
+  function renderLife() {
+    if (!panelEl) return;
+    const el = panelEl.querySelector("#valk-life-body");
+    if (!el) return;
+    const r = life.reasons;
+    el.innerHTML =
+      `Entrés à vie : <b style="color:#7fdca8">${life.entered}</b><br>` +
+      `Refusés à vie : <b style="color:#e07a5f">${life.refused}</b><br>` +
+      `&nbsp;&nbsp;• mise trop basse : ${r.miseBasse}<br>` +
+      `&nbsp;&nbsp;• mauvais jeu : ${r.mauvaisJeu}<br>` +
+      `&nbsp;&nbsp;• timing / éligibilité : ${r.timing}<br>` +
+      `&nbsp;&nbsp;• autre : ${r.autre}`;
   }
 
   function makeDraggable(el, handle) {
@@ -610,7 +714,9 @@
       el.style.top = oy + (e.clientY - sy) + "px";
       el.style.right = "auto"; el.style.bottom = "auto";
     });
-    window.addEventListener("mouseup", () => (drag = false));
+    window.addEventListener("mouseup", () => {
+      if (drag) { drag = false; try { GM_setValue("valk_pos", { left: el.style.left, top: el.style.top }); } catch (e) {} }
+    });
   }
 
   function modeSymbol(raffle) {
@@ -622,7 +728,14 @@
     if (!panelEl) return;
     const el = panelEl.querySelector("#valk-hunt");
     if (!el) return;
-    const games = activeGames();
+    let games;
+    if (viewFilter) {
+      // Un jeu précis choisi dans le menu « Voir » (même si tu n'y joues pas en ce moment).
+      const r0 = activeRaffles.find((r) => norm(r.gameName) === viewFilter);
+      games = r0 ? [{ name: r0.gameName }] : [];
+    } else {
+      games = activeGames();
+    }
     if (!games.length) { el.innerHTML = `<span class="miss">— (joue pour détecter le jeu)</span>`; return; }
     const multi = games.length > 1;
     const parts = [];
