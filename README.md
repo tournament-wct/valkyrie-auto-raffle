@@ -129,9 +129,3 @@ En haut du fichier, quelques constantes ajustables :
 Le volume, l'interrupteur on/off et la position du panneau se règlent directement depuis le panneau et sont **mémorisés automatiquement**.
 
 ---
-
-## 🔄 Publier une mise à jour (pour le mainteneur)
-
-1. Modifie le fichier `valkyrie-auto-raffle.user.js`.
-2. **Incrémente `@version`** en haut (c'est ce qui déclenche la MAJ chez tout le monde).
-3. Commit + push. Tampermonkey détecte la nouvelle version au prochain contrôle.
