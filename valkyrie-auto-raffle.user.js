@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Valkyrie Auto-Raffle (Stake → Valkyrie Studio)
 // @namespace    oracle-labs.valkyrie
-// @version      1.9.0
+// @version      2.0.0
 // @description  Capture les bets de ta session Stake et, quand le jeu + le multiplicateur correspondent à une raffle Valkyrie Studio, envoie automatiquement le bet dans la raffle.
 // @author       Oracle Labs
 // @match        https://stake.com/*
@@ -82,15 +82,52 @@
   try { enabled = GM_getValue("valk_enabled", true) !== false; } catch (e) {}
   let viewFilter = null; // null = jeux actifs ; sinon nom normalisé d'un jeu à afficher
 
-  let life = { entered: 0, refused: 0, reasons: { miseBasse: 0, mauvaisJeu: 0, timing: 0, autre: 0 } };
+  let life = { entered: 0, refused: 0, reasons: { miseBasse: 0, mauvaisJeu: 0, timing: 0, autre: 0 }, wagered: {} };
   try {
     const l = GM_getValue("valk_life", null);
     if (l && typeof l === "object") {
       life.entered = l.entered || 0; life.refused = l.refused || 0;
       if (l.reasons) for (const k in life.reasons) life.reasons[k] = l.reasons[k] || 0;
+      if (l.wagered && typeof l.wagered === "object") life.wagered = l.wagered;
     }
   } catch (e) {}
   function saveLife() { try { GM_setValue("valk_life", life); } catch (e) {} }
+
+  // Stats du jour : mêmes compteurs que "à vie", mais remis à zéro chaque jour (heure locale).
+  function todayStr() {
+    const d = new Date();
+    return d.getFullYear() + "-" + String(d.getMonth() + 1).padStart(2, "0") + "-" + String(d.getDate()).padStart(2, "0");
+  }
+  let today = { date: todayStr(), entered: 0, refused: 0, reasons: { miseBasse: 0, mauvaisJeu: 0, timing: 0, autre: 0 }, wagered: {} };
+  try {
+    const t0 = GM_getValue("valk_today", null);
+    if (t0 && t0.date === todayStr()) today = t0;
+  } catch (e) {}
+  function saveToday() { try { GM_setValue("valk_today", today); } catch (e) {} }
+  function ensureTodayFresh() {
+    const t = todayStr();
+    if (today.date !== t) {
+      today = { date: t, entered: 0, refused: 0, reasons: { miseBasse: 0, mauvaisJeu: 0, timing: 0, autre: 0 }, wagered: {} };
+      saveToday();
+    }
+  }
+
+  // Ajoute au compteur de mise informatif (à vie + aujourd'hui) — regroupé par devise, car on
+  // n'a pas de taux de change fiable pour tout convertir en une seule unité.
+  function addWager(bet) {
+    if (bet.amount == null || isNaN(bet.amount)) return;
+    ensureTodayFresh();
+    const cur = bet.currency || "?";
+    life.wagered[cur] = (life.wagered[cur] || 0) + bet.amount;
+    today.wagered[cur] = (today.wagered[cur] || 0) + bet.amount;
+    saveLife(); saveToday();
+  }
+  function fmtAmt(v) { return (Math.round(v * 1e6) / 1e6).toString(); }
+  function fmtWagered(obj) {
+    const keys = Object.keys(obj);
+    if (!keys.length) return "—";
+    return keys.map((c) => `${fmtAmt(obj[c])} ${c === "?" ? "(devise inconnue)" : c}`).join(" · ");
+  }
 
   // Range un motif de refus dans une catégorie lisible.
   function categorizeRefusal(reason) {
@@ -425,7 +462,7 @@
     }
 
     seenBets.set(bet.id, bet);
-    if (isNew) stats.captured++;
+    if (isNew) { stats.captured++; addWager(bet); }
     considerBet(bet);
     updatePanel();
   }
@@ -485,6 +522,7 @@
       if (okStatus && !bodySaysFail) {
         stats.sent++; rememberPair(key);
         life.entered++; saveLife();
+        ensureTodayFresh(); today.entered++; saveToday();
         log(`✅ ENTRÉ dans ${tag}`);
         recordEntry({ t: Date.now(), betInput: input, raffleId: raffle.id, raffle: raffle.name, game: bet.game, multi: bet.multiplier, status: "entré" });
         notifyEntry(bet, raffle);
@@ -495,6 +533,7 @@
         stats.failed++;
         const cat = categorizeRefusal(reason);
         life.refused++; life.reasons[cat] = (life.reasons[cat] || 0) + 1; saveLife();
+        ensureTodayFresh(); today.refused++; today.reasons[cat] = (today.reasons[cat] || 0) + 1; saveToday();
         // Un refus définitif (mise trop basse, mauvais jeu…) ne changera pas : on mémorise la
         // paire pour ne pas re-marteler Valkyrie si le même bet réapparaît. On ne mémorise PAS
         // les erreurs serveur (5xx) ni réseau, qui elles peuvent être transitoires.
@@ -656,7 +695,11 @@
       #valk-panel .vhist div{padding:2px 0;border-bottom:1px solid #221c15;color:#b9ad9c}
       #valk-panel .vhistrow{cursor:pointer}
       #valk-panel .vhistrow:hover{color:#e0a86b}
+      #valk-panel .vhistday{color:#e0a86b;font-size:10px;font-weight:600;margin-top:6px;padding:2px 0 3px}
+      #valk-panel .vhistday:first-child{margin-top:0}
       #valk-panel .vmini{font-size:10px;color:#8a7c6a}
+      #valk-panel .vlifecols{display:flex;gap:14px}
+      #valk-panel .vlifecols>div{flex:1}
     `);
     panelEl = document.createElement("div");
     panelEl.id = "valk-panel";
@@ -698,6 +741,7 @@
           <div id="valk-manual-res" class="vmini" style="margin-top:6px"></div>
         </div>
         <div class="vpanel" id="valk-history" hidden>
+          <input id="valk-hist-search" placeholder="Filtrer par jeu ou raffle…" />
           <div class="vhist" id="valk-hist-list"></div>
           <button class="vbtn" data-act="export" style="width:100%;margin-top:6px">📤 Exporter (presse-papier)</button>
         </div>
@@ -743,6 +787,10 @@
     });
     panelEl.querySelector('[data-act="manual-send"]').addEventListener("click", manualSend);
     panelEl.querySelector('[data-act="export"]').addEventListener("click", exportEntries);
+    panelEl.querySelector("#valk-hist-search").addEventListener("input", (e) => {
+      histSearch = e.target.value;
+      renderHistory();
+    });
 
     // Interrupteur on/off persistant
     panelEl.querySelector('[data-act="edit-username"]').addEventListener("click", () => {
@@ -778,8 +826,9 @@
       if (!p.hidden) renderLife();
     });
     panelEl.querySelector('[data-act="life-reset"]').addEventListener("click", () => {
-      life = { entered: 0, refused: 0, reasons: { miseBasse: 0, mauvaisJeu: 0, timing: 0, autre: 0 } };
-      saveLife(); renderLife();
+      life = { entered: 0, refused: 0, reasons: { miseBasse: 0, mauvaisJeu: 0, timing: 0, autre: 0 }, wagered: {} };
+      today = { date: todayStr(), entered: 0, refused: 0, reasons: { miseBasse: 0, mauvaisJeu: 0, timing: 0, autre: 0 }, wagered: {} };
+      saveLife(); saveToday(); renderLife();
     });
 
     // Restaure la position mémorisée
@@ -817,16 +866,23 @@
 
   function renderLife() {
     if (!panelEl) return;
+    ensureTodayFresh();
     const el = panelEl.querySelector("#valk-life-body");
     if (!el) return;
     const r = life.reasons;
     el.innerHTML =
-      `Entrés à vie : <b style="color:#7fdca8">${life.entered}</b><br>` +
-      `Refusés à vie : <b style="color:#e07a5f">${life.refused}</b><br>` +
-      `&nbsp;&nbsp;• mise trop basse : ${r.miseBasse}<br>` +
+      `<div class="vlifecols">
+        <div><div class="vlabel">Aujourd'hui</div>Entrés : <b style="color:#7fdca8">${today.entered}</b><br>Refusés : <b style="color:#e07a5f">${today.refused}</b></div>
+        <div><div class="vlabel">À vie</div>Entrés : <b style="color:#7fdca8">${life.entered}</b><br>Refusés : <b style="color:#e07a5f">${life.refused}</b></div>
+      </div>
+      <div class="vlabel" style="margin-top:8px">Répartition des refus (à vie)</div>
+      &nbsp;&nbsp;• mise trop basse : ${r.miseBasse}<br>` +
       `&nbsp;&nbsp;• mauvais jeu : ${r.mauvaisJeu}<br>` +
       `&nbsp;&nbsp;• timing / éligibilité : ${r.timing}<br>` +
-      `&nbsp;&nbsp;• autre : ${r.autre}`;
+      `&nbsp;&nbsp;• autre : ${r.autre}<br>` +
+      `<div class="vlabel" style="margin-top:8px">💰 Misé sur les jeux suivis <span class="vmini">(informatif — aucune recommandation)</span></div>` +
+      `Aujourd'hui : ${fmtWagered(today.wagered)}<br>` +
+      `À vie : ${fmtWagered(life.wagered)}`;
   }
 
   function makeDraggable(el, handle) {
@@ -922,16 +978,39 @@
     }
   }
 
+  let histSearch = "";
+  function dayLabel(ts) {
+    const d = new Date(ts), now = new Date();
+    const startOfDay = (x) => new Date(x.getFullYear(), x.getMonth(), x.getDate()).getTime();
+    const diff = Math.round((startOfDay(now) - startOfDay(d)) / 86400000);
+    if (diff === 0) return "Aujourd'hui";
+    if (diff === 1) return "Hier";
+    return d.toLocaleDateString();
+  }
+  function matchesSearch(e, q) {
+    const hay = `${e.raffle || ""} ${e.game || ""}`.toLowerCase();
+    return hay.includes(q.toLowerCase());
+  }
+
   function renderHistory() {
     if (!panelEl) return;
     const list = panelEl.querySelector("#valk-hist-list");
     if (!list) return;
-    if (!entries.length) { list.innerHTML = `<div class="vmini">Aucune entrée pour l'instant.</div>`; return; }
-    list.innerHTML = entries.slice(0, 12).map((e, i) => {
-      const time = new Date(e.t).toLocaleString();
+    const q = histSearch.trim();
+    const filtered = entries.filter((e) => !q || matchesSearch(e, q));
+    if (!filtered.length) {
+      list.innerHTML = `<div class="vmini">${q ? "Aucun résultat pour ce filtre." : "Aucune entrée pour l'instant."}</div>`;
+      return;
+    }
+    let html = "", lastLabel = null;
+    filtered.slice(0, 40).forEach((e) => {
+      const label = dayLabel(e.t);
+      if (label !== lastLabel) { html += `<div class="vhistday">${label}</div>`; lastLabel = label; }
+      const time = new Date(e.t).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
       const mult = e.multi != null ? ` ${e.multi}x` : "";
-      return `<div class="vhistrow" data-idx="${i}" title="Ouvrir la page des raffles Valkyrie">${time} · ${e.raffle}<br><span class="vmini">${e.game || "?"}${mult} · ${e.betInput}</span></div>`;
-    }).join("");
+      html += `<div class="vhistrow" title="Ouvrir la page des raffles Valkyrie">${time} · ${e.raffle}<br><span class="vmini">${e.game || "?"}${mult} · ${e.betInput}</span></div>`;
+    });
+    list.innerHTML = html;
     list.querySelectorAll(".vhistrow").forEach((row) => {
       row.addEventListener("click", () => {
         // Le format d'un lien direct vers UNE raffle n'est pas connu avec certitude :
@@ -990,6 +1069,7 @@
     setInterval(loadActiveRaffles, RAFFLE_REFRESH_MS);
     // Purge des jeux inactifs même sans nouveau trafic (sinon l'affichage resterait figé).
     setInterval(() => { if (pruneGames()) { updatePanel(); renderHunting(); } }, 5000);
+    setInterval(() => { const before = today.date; ensureTodayFresh(); if (today.date !== before) renderLife(); }, 60000);
     log("Démarré. En attente de bets…");
   }
 
