@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Valkyrie Auto-Raffle (Stake → Valkyrie Studio)
 // @namespace    oracle-labs.valkyrie
-// @version      1.3.0
+// @version      1.4.0
 // @description  Capture les bets de ta session Stake et, quand le jeu + le multiplicateur correspondent à une raffle Valkyrie Studio, envoie automatiquement le bet dans la raffle.
 // @author       Oracle Labs
 // @match        https://stake.com/*
@@ -42,6 +42,7 @@
   const ONLY_VALKYRIE_GAMES = true; // ne traiter que les bets dont le jeu a une raffle active
   const ONLY_OWN_BETS = true;       // ne traiter que TES bets (ignore ceux des autres joueurs vus dans les feeds)
   const NOTIFY_ON_ENTRY = true;     // notif navigateur + son quand un bet est ENTRÉ
+  const RECENT_GAME_MS = 45000;     // durée pendant laquelle un jeu reste "actif" (gère plusieurs slots à la fois)
   // Champs présents uniquement sur TON user (pas sur les users publics des feeds) : sert à détecter ton compte.
   const SELF_MARKERS = ["email", "balances", "vaultBalances", "vaultBalance", "kycStatus", "mfaEnabled", "hasVerifiedEmail", "activeClientSeed", "sessionCount"];
   const LOG_PREFIX = "[Valkyrie AR]";
@@ -57,7 +58,7 @@
   const submitQueue = [];
   let queueRunning = false;
   let paused = false;
-  let currentGame = null;
+  const recentGames = new Map(); // normName -> { name, slug, t } : jeux Valkyrie actifs récemment
   let myUsername = null; // détecté depuis ta session ; null = pas encore connu (on ne filtre pas)
 
   const stats = { payloads: 0, captured: 0, matched: 0, sent: 0, conflict: 0, failed: 0, foreign: 0 };
@@ -118,6 +119,29 @@
 
   function norm(s) { return String(s || "").toLowerCase().replace(/[^a-z0-9]/g, ""); }
   function isTargetGame(name) { return !!name && targetGames.has(norm(name)); }
+
+  // --- Gestion de plusieurs slots à la fois : on garde une fenêtre glissante de jeux actifs ---
+  function pruneGames() {
+    const cutoff = Date.now() - RECENT_GAME_MS;
+    let changed = false;
+    for (const [k, v] of recentGames) if (v.t < cutoff) { recentGames.delete(k); changed = true; }
+    return changed;
+  }
+  function touchGame(g) {
+    const key = norm(g.name);
+    const existed = recentGames.has(key);
+    recentGames.set(key, { name: g.name, slug: g.slug || null, t: Date.now() });
+    const pruned = pruneGames();
+    return !existed || pruned; // vrai si l'ensemble des jeux affichés a changé
+  }
+  function activeGames() {
+    pruneGames();
+    return [...recentGames.values()].sort((a, b) => b.t - a.t);
+  }
+  function mostRecentGameName() {
+    const g = activeGames()[0];
+    return g ? g.name : null;
+  }
 
   function findGameContext(node, depth) {
     if (!node || typeof node !== "object" || depth > 7) return null;
@@ -213,12 +237,10 @@
     }
 
     const g = findGameContext(obj, 0);
-    // On ne suit le "jeu courant" que pour les jeux Valkyrie (ceux ayant une raffle) :
-    // évite d'afficher/mémoriser un jeu hors Valkyrie (Limbo, Dice…) et de mal étiqueter
-    // un bet Valkyrie qui se règlerait en retard après un changement de jeu.
+    // On ne suit le "jeu courant" que pour les jeux Valkyrie (ceux ayant une raffle).
+    // Fenêtre glissante : gère plusieurs slots en même temps sans faire clignoter l'affichage.
     const gameRelevant = g && g.name && (!ONLY_VALKYRIE_GAMES || isTargetGame(g.name));
-    if (gameRelevant && (!currentGame || currentGame.name !== g.name)) {
-      currentGame = g;
+    if (gameRelevant && touchGame(g)) {
       updatePanel();
       renderHunting();
     }
@@ -238,7 +260,7 @@
 
   function handleBet(bet) {
     if (!bet.id) return;
-    if (!bet.game && currentGame && currentGame.name) bet.game = currentGame.name;
+    if (!bet.game) { const rg = mostRecentGameName(); if (rg) bet.game = rg; }
 
     // Filtre "Valkyrie uniquement" : on ignore tout jeu sans raffle active.
     // (pas de garde sur targetGames.size : tant que les raffles ne sont pas chargées,
@@ -448,6 +470,7 @@
       #valk-panel .vsec{margin:8px 0;border-top:1px solid #33291f;padding-top:8px}
       #valk-panel .vlabel{color:#8a7c6a;margin-bottom:4px}
       #valk-panel .vhunt div{color:#7fdca8;padding:1px 0}
+      #valk-panel .vhunt .gname{color:#e0a86b;margin-top:5px;font-size:10px;font-weight:600}
       #valk-panel .vhunt .miss{color:#8a7c6a}
       #valk-panel .vlog{max-height:130px;overflow-y:auto;border-top:1px solid #33291f;padding-top:7px;
         margin-top:8px;font-size:10.5px;color:#b9ad9c}
@@ -563,13 +586,21 @@
     if (!panelEl) return;
     const el = panelEl.querySelector("#valk-hunt");
     if (!el) return;
-    if (!currentGame || !currentGame.name) { el.innerHTML = `<span class="miss">— (joue pour détecter le jeu)</span>`; return; }
-    const cg = norm(currentGame.name);
-    const matching = activeRaffles.filter((r) => norm(r.gameName) === cg);
-    if (!matching.length) { el.innerHTML = `<span class="miss">${currentGame.name} — aucune raffle</span>`; return; }
-    el.innerHTML = matching
-      .map((r) => `<div>${modeSymbol(r)} ${r.multiplierValue}x — ${r.name}</div>`)
-      .join("");
+    const games = activeGames();
+    if (!games.length) { el.innerHTML = `<span class="miss">— (joue pour détecter le jeu)</span>`; return; }
+    const multi = games.length > 1;
+    const parts = [];
+    for (const g of games) {
+      const cg = norm(g.name);
+      const matching = activeRaffles.filter((r) => norm(r.gameName) === cg);
+      if (multi) parts.push(`<div class="gname">${g.name}</div>`);
+      if (!matching.length) {
+        parts.push(`<div class="miss">${multi ? "" : g.name + " — "}aucune raffle</div>`);
+      } else {
+        parts.push(matching.map((r) => `<div>${modeSymbol(r)} ${r.multiplierValue}x — ${r.name}</div>`).join(""));
+      }
+    }
+    el.innerHTML = parts.join("");
   }
 
   function populateManualRaffles() {
@@ -636,7 +667,8 @@
     const set = (k, v) => { const n = panelEl.querySelector(`[data-k="${k}"]`); if (n) n.textContent = v; };
     set("raffles", activeRaffles.length || "—");
     set("me", myUsername || "—");
-    set("game", currentGame && currentGame.name ? currentGame.name : "—");
+    const games = activeGames();
+    set("game", games.length ? games.map((g) => g.name).join(" + ") : "—");
     set("payloads", stats.payloads);
     set("captured", stats.captured);
     set("matched", stats.matched);
@@ -666,6 +698,8 @@
     buildPanel();
     loadActiveRaffles();
     setInterval(loadActiveRaffles, RAFFLE_REFRESH_MS);
+    // Purge des jeux inactifs même sans nouveau trafic (sinon l'affichage resterait figé).
+    setInterval(() => { if (pruneGames()) { updatePanel(); renderHunting(); } }, 5000);
     log("Démarré. En attente de bets…");
   }
 
@@ -674,7 +708,8 @@
 
   window.__valk = {
     stats, seenBets, entries,
-    currentGame: () => currentGame,
+    currentGame: () => activeGames(),
+    activeGames: () => activeGames(),
     targetGames: () => [...targetGames],
     activeRaffles: () => activeRaffles,
     dumpBets: () => console.table([...seenBets.values()]),
