@@ -16,10 +16,10 @@
 // @grant        GM_addStyle
 // @run-at       document-start
 // @noframes
-// -- Auto-update : remplace <toi>/<repo> par ton dépôt GitHub (voir guide). Ces 2 lignes
+// -- Auto-update (dépôt : tournament-wct/valkyrie-auto-raffle). Ces 2 lignes
 //    DOIVENT rester à l'intérieur du bloc ==UserScript== pour que la MAJ auto fonctionne.
-// @updateURL    https://raw.githubusercontent.com/<toi>/<repo>/main/valkyrie-auto-raffle.user.js
-// @downloadURL  https://raw.githubusercontent.com/<toi>/<repo>/main/valkyrie-auto-raffle.user.js
+// @updateURL    https://raw.githubusercontent.com/tournament-wct/valkyrie-auto-raffle/main/valkyrie-auto-raffle.user.js
+// @downloadURL  https://raw.githubusercontent.com/tournament-wct/valkyrie-auto-raffle/main/valkyrie-auto-raffle.user.js
 // ==/UserScript==
 //
 // Ce script est PASSIF : il lit uniquement ce que ta propre session Stake reçoit déjà
