@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Valkyrie Auto-Raffle (Stake → Valkyrie Studio)
 // @namespace    oracle-labs.valkyrie
-// @version      1.8.0
+// @version      1.8.1
 // @description  Capture les bets de ta session Stake et, quand le jeu + le multiplicateur correspondent à une raffle Valkyrie Studio, envoie automatiquement le bet dans la raffle.
 // @author       Oracle Labs
 // @match        https://stake.com/*
@@ -100,7 +100,7 @@
     return "autre";
   }
 
-  const stats = { payloads: 0, captured: 0, matched: 0, sent: 0, conflict: 0, failed: 0, foreign: 0 };
+  const stats = { payloads: 0, captured: 0, matched: 0, sent: 0, conflict: 0, failed: 0, foreign: 0, unknownGame: 0 };
 
   let sentPairs = new Set();
   try { sentPairs = new Set(JSON.parse(GM_getValue(SENT_STORE_KEY, "[]"))); } catch (e) { sentPairs = new Set(); }
@@ -205,7 +205,14 @@
   function norm(s) { return String(s || "").toLowerCase().replace(/[^a-z0-9]/g, ""); }
   function isTargetGame(name) { return !!name && targetGames.has(norm(name)); }
 
-  // --- Gestion de plusieurs slots à la fois : on garde une fenêtre glissante de jeux actifs ---
+  // --- Gestion de plusieurs slots à la fois : on garde une fenêtre glissante de jeux actifs
+  // (pour l'AFFICHAGE uniquement). Le jeu de "secours" utilisé pour attribuer un bet sans nom
+  // de jeu, lui, NE PÉRIME PAS : certains jeux n'envoient leur nom qu'une fois au chargement,
+  // pas à chaque tour — le périmer trop vite ferait ignorer silencieusement de vrais bets.
+  // Valkyrie reste de toute façon juge final (elle rejette un bet mal attribué), donc mieux
+  // vaut deviner large que rater une entrée légitime.
+  let lastKnownGame = null;
+
   function pruneGames() {
     const cutoff = Date.now() - RECENT_GAME_MS;
     let changed = false;
@@ -213,19 +220,26 @@
     return changed;
   }
   function touchGame(g) {
+    // Toujours mis à jour, quel que soit le jeu et même si les raffles ne sont pas encore
+    // chargées : c'est ce qui sert de secours pour attribuer un bet sans nom de jeu. Un jeu
+    // hors Valkyrie (Limbo…) attribué à un bet sera de toute façon filtré juste après par
+    // isTargetGame — donc pas de risque à le retenir largement.
+    lastKnownGame = { name: g.name, slug: g.slug || null };
+  }
+  function touchDisplayGame(g) {
+    // Version filtrée, pour l'AFFICHAGE uniquement (n'affiche jamais un jeu hors Valkyrie).
     const key = norm(g.name);
     const existed = recentGames.has(key);
     recentGames.set(key, { name: g.name, slug: g.slug || null, t: Date.now() });
     const pruned = pruneGames();
-    return !existed || pruned; // vrai si l'ensemble des jeux affichés a changé
+    return !existed || pruned;
   }
   function activeGames() {
     pruneGames();
     return [...recentGames.values()].sort((a, b) => b.t - a.t);
   }
   function mostRecentGameName() {
-    const g = activeGames()[0];
-    return g ? g.name : null;
+    return lastKnownGame ? lastKnownGame.name : null;
   }
 
   function findGameContext(node, depth) {
@@ -322,12 +336,15 @@
     }
 
     const g = findGameContext(obj, 0);
-    // On ne suit le "jeu courant" que pour les jeux Valkyrie (ceux ayant une raffle).
-    // Fenêtre glissante : gère plusieurs slots en même temps sans faire clignoter l'affichage.
-    const gameRelevant = g && g.name && (!ONLY_VALKYRIE_GAMES || isTargetGame(g.name));
-    if (gameRelevant && touchGame(g)) {
-      updatePanel();
-      renderHunting();
+    if (g && g.name) {
+      touchGame(g); // attribution : toujours à jour, quel que soit le jeu
+      // Affichage ("jeu courant" / "tu chasses") : uniquement les jeux Valkyrie, pour ne pas
+      // montrer un jeu hors sujet (Limbo, Dice…) qui prêterait à confusion.
+      const gameRelevant = !ONLY_VALKYRIE_GAMES || isTargetGame(g.name);
+      if (gameRelevant && touchDisplayGame(g)) {
+        updatePanel();
+        renderHunting();
+      }
     }
 
     const found = [];
@@ -350,7 +367,18 @@
     // Filtre "Valkyrie uniquement" : on ignore tout jeu sans raffle active.
     // (pas de garde sur targetGames.size : tant que les raffles ne sont pas chargées,
     //  rien n'est envoyable de toute façon, donc on peut ignorer sans risque.)
-    if (ONLY_VALKYRIE_GAMES && !isTargetGame(bet.game)) return;
+    if (ONLY_VALKYRIE_GAMES && !isTargetGame(bet.game)) {
+      // Jeu totalement inconnu (jamais vu de contexte) : on le signale, car c'est le seul
+      // cas où un bet légitime pourrait passer à la trappe silencieusement.
+      if (!bet.game) {
+        stats.unknownGame++;
+        if (stats.unknownGame <= 5 || stats.unknownGame % 20 === 0) {
+          log(`❓ Bet ignoré : jeu inconnu (aucun contexte de jeu détecté pour l'instant).`);
+        }
+        updatePanel();
+      }
+      return;
+    }
 
     // Filtre "tes bets uniquement" : on ignore les bets attribués à un autre joueur
     // (vus dans les feeds). Tant que ton compte n'est pas connu, on ne bloque rien.
@@ -615,6 +643,7 @@
           <span>Entrés ✅</span><b data-k="entered">0</b>
           <span>Refusés ⛔</span><b data-k="refused">0</b>
           <span>Autres joueurs ⊘</span><b data-k="foreign">0</b>
+          <span>Jeu inconnu ❓</span><b data-k="unknownGame">0</b>
         </div>
         <div class="vsec">
           <select class="vsel" id="valk-view" style="margin-bottom:6px"><option value="">Voir : jeux actifs</option></select>
@@ -661,7 +690,7 @@
     });
     panelEl.querySelector('[data-act="reset"]').addEventListener("click", () => {
       stats.payloads = 0; stats.captured = 0; stats.matched = 0;
-      stats.sent = 0; stats.conflict = 0; stats.failed = 0; stats.foreign = 0;
+      stats.sent = 0; stats.conflict = 0; stats.failed = 0; stats.foreign = 0; stats.unknownGame = 0;
       updatePanel();
       log("↺ Stats remises à zéro.");
     });
@@ -892,6 +921,7 @@
     set("entered", stats.sent);
     set("refused", stats.failed);
     set("foreign", stats.foreign);
+    set("unknownGame", stats.unknownGame);
   }
 
   function log(msg) {
@@ -927,6 +957,7 @@
     stats, seenBets, entries,
     currentGame: () => activeGames(),
     activeGames: () => activeGames(),
+    lastKnownGame: () => lastKnownGame,
     targetGames: () => [...targetGames],
     activeRaffles: () => activeRaffles,
     dumpBets: () => console.table([...seenBets.values()]),
