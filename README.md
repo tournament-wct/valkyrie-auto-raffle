@@ -22,7 +22,7 @@ Il lit passivement les bets que tu places pendant ta session, et dès qu'un de *
 
 ## ⚙️ Comment ça marche
 
-- Le script écoute le trafic que **ta** session Stake reçoit déjà (fetch / XHR / WebSocket) pour repérer les bets — y compris les slots tiers dont le résultat arrive par WebSocket.
+- Le script écoute le trafic que **ta** session Stake reçoit déjà (fetch / XHR / WebSocket) pour repérer les bets — y compris les slots tiers dont le résultat arrive par WebSocket, et **plusieurs slots en même temps**.
 - Il récupère la liste des **raffles actives** sur l'API publique de Valkyrie et en déduit les **jeux à suivre**.
 - Pour chaque bet, il vérifie **3 conditions** avant d'envoyer :
   1. **C'est ton bet** (pas celui d'un autre joueur vu dans un feed).
@@ -31,8 +31,8 @@ Il lit passivement les bets que tu places pendant ta session, et dès qu'un de *
      - mode `min` → multiplicateur ≥ seuil
      - mode `max` → multiplicateur ≤ seuil
      - mode `exact` → multiplicateur = seuil
-- Si tout est bon, il envoie le bet à Valkyrie. La décision finale (éligibilité, mise minimale en USD, timing) est **validée côté serveur Valkyrie** — le script se fie à sa réponse.
-- Anti-doublon persistant + délai entre deux envois pour rester correct avec le serveur.
+- Si tout est bon, il envoie le bet à Valkyrie. La décision finale (éligibilité, **mise minimale en USD**, timing) est **validée côté serveur Valkyrie** — le script se fie à sa réponse, et affiche la raison exacte en cas de refus.
+- Anti-doublon persistant (un bet définitivement refusé n'est pas re-tenté) + délai entre deux envois pour rester correct avec le serveur.
 
 ---
 
@@ -42,7 +42,7 @@ Il lit passivement les bets que tu places pendant ta session, et dès qu'un de *
 |---|---|
 | **Raffles actives** | Nombre de raffles en cours chez Valkyrie |
 | **Ton compte** | Ton pseudo, détecté depuis ta session (tant qu'il est « — », aucun filtrage par joueur) |
-| **Jeu courant** | Le jeu **Valkyrie** détecté sur lequel tu joues |
+| **Jeu courant** | Le(s) jeu(x) Valkyrie détecté(s) — affiche plusieurs slots si tu en lances plusieurs |
 | **Trafic réseau** | Tout le trafic vu passer (tes jeux, feeds des autres, chat…) — simple témoin « la capture est vivante » |
 | **Bets capturés** | Tes bets retenus (jeux Valkyrie uniquement) |
 | **Correspondances** | Bets qui collent à une raffle (bon jeu + multi) |
@@ -50,25 +50,28 @@ Il lit passivement les bets que tu places pendant ta session, et dès qu'un de *
 | **Refusés ⛔** | Bets envoyés mais refusés par Valkyrie (raison dans le journal) |
 | **Autres joueurs ⊘** | Bets d'autres joueurs (vus dans les feeds) ignorés |
 
-**« Sur ce jeu, tu vises »** — pendant que tu joues un slot Valkyrie, le panneau liste en temps réel les raffles de ce jeu avec leur seuil (`≥ 300x`, `= 50x`, `≤ …`), pour voir direct ce que tu chasses.
+**« Sur ce jeu, tu vises »** — pendant que tu joues, le panneau liste les raffles du jeu en cours avec leur **seuil de multi ET leur mise minimale** (`≥ 300x · mise ≥ $3.00`), pour voir direct ce qui est à ta portée. Un menu **« Voir »** juste au-dessus permet de filtrer l'affichage sur un slot précis (utile quand plusieurs tournent).
 
 Dans le journal, chaque envoi affiche clairement le résultat :
 
 - `✅ ENTRÉ dans « … »` → le bet est dans la raffle
-- `✅ Déjà dedans « … »` → il y était déjà
-- `⛔ Refusé — « … » : <raison>` → pas rentré, avec le message exact de Valkyrie
+- `↔️ Déjà tenté « … »` → déjà soumis
+- `⛔ Refusé — « … » : <raison>` → pas rentré, avec le message exact de Valkyrie (ex. mise trop basse)
 
 ---
 
-## 🎛️ Les boutons du panneau
+## 🎛️ Les commandes du panneau
 
-- **⏸ Pause / ▶ Reprendre** — suspend les envois à tout moment.
-- **↺ Reset** — remet les compteurs à zéro (sans toucher à l'anti-doublon).
-- **✍️ Saisie manuelle** — colle un bet id et choisis une raffle pour forcer un envoi (utile pour rattraper un bet manqué par la capture).
-- **📋 Historique** — la liste de tes bets entrés (heure, raffle, jeu, multi, id), gardée entre les sessions.
-- **📤 Exporter** — copie tout l'historique (JSON) dans le presse-papier.
+- **⏻ (en-tête)** — interrupteur **on/off persistant** : coupe le script et il reste OFF même après un rechargement (à la différence de Pause, temporaire).
+- **— (en-tête)** — réduit / déplie le panneau.
+- **⏸ Pause / ▶ Reprendre** — suspend les envois pour la session en cours.
+- **↺ Reset** — remet les compteurs de session à zéro (sans toucher à l'anti-doublon ni aux stats à vie).
+- **🔊 / 🔉 / 🔇** — volume du son de notification (fort → bas → muet), retenu entre les sessions.
+- **✍️ Manuel** — colle un bet id et choisis une raffle pour forcer un envoi (rattraper un bet manqué).
+- **📋 Historique** — la liste de tes bets entrés (heure, raffle, jeu, multi, id), gardée entre les sessions. Bouton **📤 Exporter** pour tout copier (JSON) dans le presse-papier.
+- **📈 À vie** — compteurs **persistants** d'entrées et de refus, avec la **répartition des refus** (mise trop basse / mauvais jeu / timing / autre) pour comprendre d'un coup d'œil pourquoi des bets n'entrent pas.
 
-Le panneau se déplace (glisse la barre du haut) et se réduit (le « — » en haut à droite). Quand un bet est réellement **entré**, une **notification navigateur + un petit son** te préviennent.
+Le panneau se **déplace depuis n'importe où** (sauf sur les boutons, le champ de saisie, le journal et l'historique, pour ne pas gêner les clics et la copie), et **retient sa position** entre les sessions. Quand un bet est réellement **entré**, une **notification + un son** te préviennent.
 
 ---
 
@@ -85,7 +88,8 @@ Le panneau se déplace (glisse la barre du haut) et se réduit (le « — » en 
 
 - **Fragile aux changements de Stake** : si Stake modifie son API, la capture peut casser le temps qu'un correctif soit publié.
 - **Passif = l'onglet doit être actif** : si l'onglet Stake est en veille, des bets peuvent être manqués. Astuce : ouvrir ton **historique de bets** sur Stake fait re-vérifier ces bets contre les raffles actives.
-- **Les gros seuils sont rares** : si une raffle demande 300x, les entrées seront rares par nature — c'est normal, le script attend qu'un vrai hit tombe.
+- **Mise minimale par raffle** : chaque raffle a sa propre mise mini en USD (certaines à $0.01, d'autres à $0.10, $3.00…). Un bet en dessous est refusé, quel que soit le multiplicateur — la mise mini est affichée dans « Sur ce jeu, tu vises ».
+- **Les gros seuils sont rares** : si une raffle demande 300x, les entrées seront rares par nature.
 - **Automatisation = zone grise vis-à-vis des CGU de Stake.** À utiliser en connaissance de cause, à tes risques.
 - Projet **non affilié** à Stake ni à Valkyrie Studio.
 
@@ -102,6 +106,10 @@ En haut du fichier, quelques constantes ajustables :
 | `NOTIFY_ON_ENTRY` | Notif navigateur + son quand un bet est entré | `true` |
 | `SUBMIT_DELAY_MS` | Délai entre deux envois | `450` |
 | `RAFFLE_REFRESH_MS` | Fréquence de rafraîchissement des raffles | `60000` |
+| `RECENT_GAME_MS` | Durée pendant laquelle un slot reste « actif » (multi-slots) | `45000` |
+| `VOL_LEVELS` | Crans du bouton volume (fort → bas → muet) | `[1, 0.35, 0]` |
+
+Le volume, l'interrupteur on/off et la position du panneau se règlent directement depuis le panneau et sont **mémorisés automatiquement**.
 
 ---
 
