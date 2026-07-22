@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Valkyrie Auto-Raffle (Stake → Valkyrie Studio)
 // @namespace    oracle-labs.valkyrie
-// @version      2.0.0
+// @version      2.0.1
 // @description  Capture les bets de ta session Stake et, quand le jeu + le multiplicateur correspondent à une raffle Valkyrie Studio, envoie automatiquement le bet dans la raffle.
 // @author       Oracle Labs
 // @match        https://stake.com/*
@@ -400,8 +400,18 @@
       if (self) { myUsername = self; log(`👤 Compte détecté automatiquement : ${myUsername} (vérifie que c'est bien toi, ou règle-le à la main).`); updatePanel(); }
     }
 
+    const found = [];
+    extractBets(obj, found, 0, null);
+
+    // Un message qui contient PLUSIEURS bets d'un coup est presque toujours un feed public
+    // (ex. "Tous les paris" / "Gros parieurs"), pas le résultat de TON propre bet — celui-ci
+    // arrive toujours seul. On traite donc ces "lots" avec une règle plus stricte (voir handleBet)
+    // et on ne s'en sert JAMAIS pour deviner ton jeu en cours (un des multiples jeux affichés
+    // dans un tel feed n'a aucune raison d'être le tien).
+    const batch = found.length > 1;
+
     const g = findGameContext(obj, 0);
-    if (g && g.name) {
+    if (g && g.name && !batch) {
       touchGame(g); // attribution : toujours à jour, quel que soit le jeu
       // Affichage ("jeu courant" / "tu chasses") : uniquement les jeux Valkyrie, pour ne pas
       // montrer un jeu hors sujet (Limbo, Dice…) qui prêterait à confusion.
@@ -412,20 +422,15 @@
       }
     }
 
-    const found = [];
-    extractBets(obj, found, 0, null);
-
-    // Détection "liste de bets" (historique) : brique pour le futur rattrapage auto.
-    // Ces bets passent par handleBet() → donc ouvrir ton historique Stake les re-vérifie déjà.
-    if (found.length >= 4) {
-      const onTarget = found.filter((b) => isTargetGame(b.game || (currentGame && currentGame.name))).length;
-      log(`🔁 Liste de ${found.length} bets re-scannée (${onTarget} sur jeu(x) suivi(s)).`);
+    if (batch) {
+      const onTarget = found.filter((b) => isTargetGame(b.game || mostRecentGameName())).length;
+      log(`🔁 Lot de ${found.length} bets (feed public probable) — ${onTarget} sur jeu(x) suivi(s), filtrés à l'identité.`);
     }
 
-    for (const bet of found) handleBet(bet);
+    for (const bet of found) handleBet(bet, batch);
   }
 
-  function handleBet(bet) {
+  function handleBet(bet, fromBatch) {
     if (!bet.id) return;
     if (!bet.game) { const rg = mostRecentGameName(); if (rg) bet.game = rg; }
 
@@ -445,12 +450,20 @@
       return;
     }
 
-    // Filtre "tes bets uniquement" : on ignore les bets attribués à un autre joueur
-    // (vus dans les feeds). Tant que ton compte n'est pas connu, on ne bloque rien.
-    if (ONLY_OWN_BETS && effectiveUsername() && bet.user && norm(bet.user) !== norm(effectiveUsername())) {
-      stats.foreign++;
-      updatePanel();
-      return;
+    // Filtre "tes bets uniquement" : on ignore les bets attribués à un autre joueur.
+    // Pour un bet ISOLÉ (résultat direct de TON placement), on ne bloque que si un pseudo
+    // différent du tien est explicitement présent. Pour un LOT (feed public "Tous les paris" /
+    // "Gros parieurs", qui peut contenir des paris masqués "Caché" sans aucun pseudo), on est
+    // strict : on n'accepte QUE si ton pseudo y figure explicitement — un pseudo absent dans un
+    // lot n'est PAS une preuve que c'est toi, contrairement à un placement isolé.
+    if (ONLY_OWN_BETS) {
+      const mine = effectiveUsername() && bet.user && norm(bet.user) === norm(effectiveUsername());
+      const foreignIsolated = !fromBatch && effectiveUsername() && bet.user && norm(bet.user) !== norm(effectiveUsername());
+      if ((fromBatch && !mine) || foreignIsolated) {
+        stats.foreign++;
+        updatePanel();
+        return;
+      }
     }
 
     const prev = seenBets.get(bet.id);
@@ -644,7 +657,11 @@
     stats.payloads++;
     let obj;
     try { obj = JSON.parse(data.t); } catch (err) { return; }
-    processPayload(obj, data.u);
+    try {
+      processPayload(obj, data.u);
+    } catch (err) {
+      console.error(`${LOG_PREFIX} Erreur interne lors du traitement d'un message (signale-la si ça se reproduit) :`, err);
+    }
     updatePanel();
   }
 
