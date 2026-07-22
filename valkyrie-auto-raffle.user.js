@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Valkyrie Auto-Raffle (Stake → Valkyrie Studio)
 // @namespace    oracle-labs.valkyrie
-// @version      1.5.2
+// @version      1.6.0
 // @description  Capture les bets de ta session Stake et, quand le jeu + le multiplicateur correspondent à une raffle Valkyrie Studio, envoie automatiquement le bet dans la raffle.
 // @author       Oracle Labs
 // @match        https://stake.com/*
@@ -60,6 +60,11 @@
   let paused = false;
   const recentGames = new Map(); // normName -> { name, slug, t } : jeux Valkyrie actifs récemment
   let myUsername = null; // détecté depuis ta session ; null = pas encore connu (on ne filtre pas)
+
+  const VOL_LEVELS = [1, 0.35, 0]; // fort → bas → muet
+  let notifVolume = 1;
+  try { const v = GM_getValue("valk_notif_vol", 1); if (typeof v === "number") notifVolume = v; } catch (e) {}
+  function volIcon(v) { return v >= 1 ? "🔊" : v > 0 ? "🔉" : "🔇"; }
 
   const stats = { payloads: 0, captured: 0, matched: 0, sent: 0, conflict: 0, failed: 0, foreign: 0 };
 
@@ -378,16 +383,18 @@
   }
 
   function beep() {
+    if (!notifVolume) return;
     try {
       const ctx = new (window.AudioContext || window.webkitAudioContext)();
       const now = ctx.currentTime;
+      const peak = 0.3 * notifVolume;
       [880, 1320].forEach((f, i) => {
         const o = ctx.createOscillator(), g = ctx.createGain();
         o.connect(g); g.connect(ctx.destination);
         o.type = "sine"; o.frequency.value = f;
         const t0 = now + i * 0.14;
         g.gain.setValueAtTime(0.0001, t0);
-        g.gain.exponentialRampToValueAtTime(0.3, t0 + 0.02);
+        g.gain.exponentialRampToValueAtTime(peak, t0 + 0.02);
         g.gain.exponentialRampToValueAtTime(0.0001, t0 + 0.13);
         o.start(t0); o.stop(t0 + 0.14);
       });
@@ -494,6 +501,7 @@
       #valk-panel .vbtn{flex:1;padding:6px;border:1px solid #33291f;border-radius:7px;
         background:#1b1712;color:#e9e2d6;cursor:pointer;font:inherit}
       #valk-panel .vbtn:hover{border-color:#e0a86b}
+      #valk-panel .vbtn-icon{flex:0 0 auto;padding:6px 11px}
       #valk-panel .vpanel{margin-top:8px;padding:8px;border:1px solid #33291f;border-radius:8px;background:#0f0d0b}
       #valk-panel .vpanel[hidden]{display:none}
       #valk-panel input,#valk-panel select{width:100%;box-sizing:border-box;margin-bottom:6px;padding:6px;
@@ -526,6 +534,7 @@
         <div class="vrow">
           <button class="vbtn" data-act="pause">⏸ Pause</button>
           <button class="vbtn" data-act="reset">↺ Reset</button>
+          <button class="vbtn vbtn-icon" data-act="vol" title="Volume des notifications">🔊</button>
         </div>
         <div class="vrow">
           <button class="vbtn" data-act="manual">✍️ Saisie manuelle</button>
@@ -559,6 +568,16 @@
       stats.sent = 0; stats.conflict = 0; stats.failed = 0; stats.foreign = 0;
       updatePanel();
       log("↺ Stats remises à zéro.");
+    });
+    const volBtn = panelEl.querySelector('[data-act="vol"]');
+    volBtn.textContent = volIcon(notifVolume);
+    volBtn.addEventListener("click", () => {
+      let i = VOL_LEVELS.indexOf(notifVolume);
+      notifVolume = VOL_LEVELS[(i + 1) % VOL_LEVELS.length];
+      try { GM_setValue("valk_notif_vol", notifVolume); } catch (e) {}
+      volBtn.textContent = volIcon(notifVolume);
+      volBtn.title = "Volume des notifications : " + (notifVolume >= 1 ? "fort" : notifVolume > 0 ? "bas" : "muet");
+      beep(); // aperçu du nouveau volume
     });
     panelEl.querySelector('[data-act="manual"]').addEventListener("click", () => {
       const p = panelEl.querySelector("#valk-manual"); p.hidden = !p.hidden;
