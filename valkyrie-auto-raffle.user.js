@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Valkyrie Auto-Raffle (Stake → Valkyrie Studio)
 // @namespace    oracle-labs.valkyrie
-// @version      2.0.1
+// @version      2.0.3
 // @description  Capture les bets de ta session Stake et, quand le jeu + le multiplicateur correspondent à une raffle Valkyrie Studio, envoie automatiquement le bet dans la raffle.
 // @author       Oracle Labs
 // @match        https://stake.com/*
@@ -411,7 +411,12 @@
     const batch = found.length > 1;
 
     const g = findGameContext(obj, 0);
-    if (g && g.name && !batch) {
+    // Un bet ISOLÉ dont le pseudo est explicitement celui de quelqu'un d'autre (ex. un détail de
+    // bet ouvert depuis le chat) ne dit rien sur CE QUE TOI tu joues en ce moment — on ne s'en
+    // sert donc pas pour mettre à jour "jeu courant" ni la case de secours (mostRecentGameName).
+    const isForeignSingleBet =
+      !batch && found.length === 1 && effectiveUsername() && found[0].user && norm(found[0].user) !== norm(effectiveUsername());
+    if (g && g.name && !batch && !isForeignSingleBet) {
       touchGame(g); // attribution : toujours à jour, quel que soit le jeu
       // Affichage ("jeu courant" / "tu chasses") : uniquement les jeux Valkyrie, pour ne pas
       // montrer un jeu hors sujet (Limbo, Dice…) qui prêterait à confusion.
@@ -430,6 +435,7 @@
     for (const bet of found) handleBet(bet, batch);
   }
 
+  let batchIdDebugSamples = 0;
   function handleBet(bet, fromBatch) {
     if (!bet.id) return;
     if (!bet.game) { const rg = mostRecentGameName(); if (rg) bet.game = rg; }
@@ -475,7 +481,17 @@
     }
 
     seenBets.set(bet.id, bet);
-    if (isNew) { stats.captured++; addWager(bet); }
+    if (isNew) {
+      stats.captured++;
+      addWager(bet);
+      // Diagnostic : si le même bet réel réapparaît "nouveau" à chaque visite d'une page comme
+      // "Mes Paris", c'est que l'identifiant extrait n'est pas stable. On logge l'identité
+      // complète pour comparer entre deux visites successives (limité pour ne pas spammer).
+      if (fromBatch && batchIdDebugSamples < 20) {
+        batchIdDebugSamples++;
+        console.log(`${LOG_PREFIX} 🧾 Bet "nouveau" issu d'un lot — id=${bet.id} betInput=${bet.betInput} jeu=${bet.game} multi=${bet.multiplier} mise=${bet.amount}${bet.currency ? " " + bet.currency : ""}`);
+      }
+    }
     considerBet(bet);
     updatePanel();
   }
