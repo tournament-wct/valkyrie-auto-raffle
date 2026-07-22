@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Valkyrie Auto-Raffle (Stake → Valkyrie Studio)
 // @namespace    oracle-labs.valkyrie
-// @version      1.4.1
+// @version      1.5.1
 // @description  Capture les bets de ta session Stake et, quand le jeu + le multiplicateur correspondent à une raffle Valkyrie Studio, envoie automatiquement le bet dans la raffle.
 // @author       Oracle Labs
 // @match        https://stake.com/*
@@ -329,19 +329,31 @@
     const tag = `« ${raffle.name} » (${bet.game} ${bet.multiplier}x)`;
     try {
       const r = await gmPost(ENTER_API, { raffleId: raffle.id, betInput: input });
-      let reason = "";
-      try { const j = JSON.parse(r.responseText); reason = j.error || j.message || ""; } catch (e) {}
+      const body = (r.responseText || "").slice(0, 400);
+      let j = null; try { j = JSON.parse(r.responseText); } catch (e) {}
+      const reason = j && (j.error || j.message) ? (j.error || j.message) : "";
+      const okStatus = r.status === 200 || r.status === 201;
+      // Un 200 peut cacher une erreur/refus dans le corps : on ne compte "entré" que si le
+      // corps ne signale aucune erreur ni échec explicite.
+      const bodySaysFail = j && (j.error || j.success === false || j.entered === false || j.ok === false);
 
-      if (r.status === 200 || r.status === 201) {
+      // Diagnostic : on montre TOUJOURS la réponse brute de Valkyrie, pour lever les faux "entrés".
+      console.log(`${LOG_PREFIX} 📥 ${input} → « ${raffle.name} » : HTTP ${r.status} — ${body}`);
+
+      if (okStatus && !bodySaysFail) {
         stats.sent++; rememberPair(key);
         log(`✅ ENTRÉ dans ${tag}`);
         recordEntry({ t: Date.now(), betInput: input, raffle: raffle.name, game: bet.game, multi: bet.multiplier, status: "entré" });
         notifyEntry(bet, raffle);
       } else if (r.status === 409) {
         stats.conflict++; rememberPair(key);
-        log(`✅ Déjà dedans ${tag}`);
+        log(`↔️ Déjà tenté ${tag}${reason ? " : " + reason : ""}`);
       } else {
         stats.failed++;
+        // Un refus définitif (mise trop basse, mauvais jeu…) ne changera pas : on mémorise la
+        // paire pour ne pas re-marteler Valkyrie si le même bet réapparaît. On ne mémorise PAS
+        // les erreurs serveur (5xx) ni réseau, qui elles peuvent être transitoires.
+        if (r.status < 500) rememberPair(key);
         log(`⛔ Refusé — ${tag}${reason ? " : " + reason : " (HTTP " + r.status + ")"}`);
       }
     } catch (e) {
@@ -600,7 +612,10 @@
       if (!matching.length) {
         parts.push(`<div class="miss">${multi ? "" : g.name + " — "}aucune raffle</div>`);
       } else {
-        parts.push(matching.map((r) => `<div>${modeSymbol(r)} ${r.multiplierValue}x — ${r.name}</div>`).join(""));
+        parts.push(matching.map((r) => {
+          const minBet = r.minBetUsd != null ? ` · mise ≥ $${r.minBetUsd}` : "";
+          return `<div>${modeSymbol(r)} ${r.multiplierValue}x${minBet} — ${r.name}</div>`;
+        }).join(""));
       }
     }
     el.innerHTML = parts.join("");
@@ -675,7 +690,7 @@
     set("payloads", stats.payloads);
     set("captured", stats.captured);
     set("matched", stats.matched);
-    set("entered", stats.sent + stats.conflict);
+    set("entered", stats.sent);
     set("refused", stats.failed);
     set("foreign", stats.foreign);
   }
