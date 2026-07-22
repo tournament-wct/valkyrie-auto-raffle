@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Valkyrie Auto-Raffle (Stake → Valkyrie Studio)
 // @namespace    oracle-labs.valkyrie
-// @version      1.2.0
+// @version      1.2.1
 // @description  Capture les bets de ta session Stake et, quand le jeu + le multiplicateur correspondent à une raffle Valkyrie Studio, envoie automatiquement le bet dans la raffle.
 // @author       Oracle Labs
 // @match        https://stake.com/*
@@ -181,7 +181,11 @@
     if (!obj || typeof obj !== "object") return;
 
     const g = findGameContext(obj, 0);
-    if (g && g.name && (!currentGame || currentGame.name !== g.name)) {
+    // On ne suit le "jeu courant" que pour les jeux Valkyrie (ceux ayant une raffle) :
+    // évite d'afficher/mémoriser un jeu hors Valkyrie (Limbo, Dice…) et de mal étiqueter
+    // un bet Valkyrie qui se règlerait en retard après un changement de jeu.
+    const gameRelevant = g && g.name && (!ONLY_VALKYRIE_GAMES || isTargetGame(g.name));
+    if (gameRelevant && (!currentGame || currentGame.name !== g.name)) {
       currentGame = g;
       updatePanel();
       renderHunting();
@@ -205,7 +209,9 @@
     if (!bet.game && currentGame && currentGame.name) bet.game = currentGame.name;
 
     // Filtre "Valkyrie uniquement" : on ignore tout jeu sans raffle active.
-    if (ONLY_VALKYRIE_GAMES && targetGames.size && !isTargetGame(bet.game)) return;
+    // (pas de garde sur targetGames.size : tant que les raffles ne sont pas chargées,
+    //  rien n'est envoyable de toute façon, donc on peut ignorer sans risque.)
+    if (ONLY_VALKYRIE_GAMES && !isTargetGame(bet.game)) return;
 
     const prev = seenBets.get(bet.id);
     const isNew = !prev;
