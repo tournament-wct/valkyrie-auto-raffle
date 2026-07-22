@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Valkyrie Auto-Raffle (Stake → Valkyrie Studio)
 // @namespace    oracle-labs.valkyrie
-// @version      1.7.0
+// @version      1.8.0
 // @description  Capture les bets de ta session Stake et, quand le jeu + le multiplicateur correspondent à une raffle Valkyrie Studio, envoie automatiquement le bet dans la raffle.
 // @author       Oracle Labs
 // @match        https://stake.com/*
@@ -43,6 +43,9 @@
   const ONLY_OWN_BETS = true;       // ne traiter que TES bets (ignore ceux des autres joueurs vus dans les feeds)
   const NOTIFY_ON_ENTRY = true;     // notif navigateur + son quand un bet est ENTRÉ
   const RECENT_GAME_MS = 45000;     // durée pendant laquelle un jeu reste "actif" (gère plusieurs slots à la fois)
+  const RAFFLES_PAGE_URL = "https://valkyriestudio.gg/raffles"; // page publique (format des liens par raffle inconnu)
+  const NOTIFY_NEW_RAFFLE = true;   // alerte quand une nouvelle raffle apparaît
+  const NOTIFY_WINS = true;         // alerte quand une raffle où tu es entré est tirée et que tu gagnes
   // Champs présents uniquement sur TON user (pas sur les users publics des feeds) : sert à détecter ton compte.
   const SELF_MARKERS = ["email", "balances", "vaultBalances", "vaultBalance", "kycStatus", "mfaEnabled", "hasVerifiedEmail", "activeClientSeed", "sessionCount"];
   const LOG_PREFIX = "[Valkyrie AR]";
@@ -53,7 +56,15 @@
   /* ======================= ÉTAT ======================= */
 
   let activeRaffles = [];
+  let drawnRaffles = [];
   let targetGames = new Set(); // noms de jeux (normalisés) ayant une raffle active
+  let knownRaffleIds = new Set(); // pour détecter les NOUVELLES raffles
+  let firstRaffleLoad = true;
+  let notifiedWinIds = new Set(); // raffles déjà vérifiées pour un gain (évite de re-notifier)
+  try { knownRaffleIds = new Set(GM_getValue("valk_known_raffles", [])); } catch (e) {}
+  try { notifiedWinIds = new Set(GM_getValue("valk_notified_wins", [])); } catch (e) {}
+  function saveKnownRaffles() { try { GM_setValue("valk_known_raffles", [...knownRaffleIds]); } catch (e) {} }
+  function saveNotifiedWins() { try { GM_setValue("valk_notified_wins", [...notifiedWinIds]); } catch (e) {} }
   const seenBets = new Map();
   const submitQueue = [];
   let queueRunning = false;
@@ -133,8 +144,29 @@
       const data = JSON.parse(r.responseText);
       const list = Array.isArray(data) ? data : data.raffles || [];
       activeRaffles = list.filter((x) => (x.status || "active") === "active");
+      drawnRaffles = list.filter((x) => x.status === "drawn");
       targetGames = new Set(activeRaffles.map((r) => norm(r.gameName)).filter(Boolean));
       log(`✅ ${activeRaffles.length} raffle(s) active(s) — ${targetGames.size} jeu(x) suivis.`);
+
+      // Alerte "nouvelle raffle" : on ignore le tout premier chargement pour ne pas spammer
+      // toutes les raffles déjà en cours au démarrage — seules les VRAIES nouvelles notifient.
+      if (NOTIFY_NEW_RAFFLE) {
+        const newOnes = activeRaffles.filter((x) => !knownRaffleIds.has(x.id));
+        if (!firstRaffleLoad) {
+          for (const nr of newOnes) {
+            log(`🆕 Nouvelle raffle : « ${nr.name} » — ${nr.gameName} ${modeSymbol(nr)} ${nr.multiplierValue}x`);
+            try {
+              GM_notification({ title: "🆕 Nouvelle raffle Valkyrie !", text: `${nr.name}\n${nr.gameName} ${modeSymbol(nr)} ${nr.multiplierValue}x`, timeout: 9000 });
+            } catch (e) {}
+            beep();
+          }
+        }
+        for (const x of list) knownRaffleIds.add(x.id);
+        saveKnownRaffles();
+      }
+      firstRaffleLoad = false;
+
+      checkWins();
       updatePanel();
       renderHunting();
       populateManualRaffles();
@@ -142,6 +174,30 @@
     } catch (e) {
       log("⚠️ Impossible de charger les raffles Valkyrie : " + (e.message || e));
     }
+  }
+
+  // Vérifie si l'une de tes entrées a gagné, en comparant les gagnants des raffles tirées
+  // à ton pseudo détecté. On ne re-vérifie jamais deux fois la même raffle une fois traitée.
+  function checkWins() {
+    if (!NOTIFY_WINS || !myUsername || !drawnRaffles.length) return;
+    const my = norm(myUsername);
+    for (const raffle of drawnRaffles) {
+      if (notifiedWinIds.has(raffle.id)) continue;
+      notifiedWinIds.add(raffle.id);
+      const winners = raffle.winners || [];
+      const won = winners.filter((w) => norm(w.user) === my);
+      if (won.length) {
+        for (const w of won) {
+          const payout = w.payout != null ? `$${Number(w.payout).toFixed(2)}` : "";
+          log(`🎉 GAGNÉ ! « ${raffle.name} » — ${payout}`);
+          try {
+            GM_notification({ title: "🎉 Tu as gagné une raffle Valkyrie !", text: `${raffle.name}\n${payout}`.trim(), timeout: 12000 });
+          } catch (e) {}
+          beep();
+        }
+      }
+    }
+    saveNotifiedWins();
   }
 
   /* ======================= EXTRACTION DES BETS ======================= */
@@ -374,7 +430,7 @@
         stats.sent++; rememberPair(key);
         life.entered++; saveLife();
         log(`✅ ENTRÉ dans ${tag}`);
-        recordEntry({ t: Date.now(), betInput: input, raffle: raffle.name, game: bet.game, multi: bet.multiplier, status: "entré" });
+        recordEntry({ t: Date.now(), betInput: input, raffleId: raffle.id, raffle: raffle.name, game: bet.game, multi: bet.multiplier, status: "entré" });
         notifyEntry(bet, raffle);
       } else if (r.status === 409) {
         stats.conflict++; rememberPair(key);
@@ -540,6 +596,8 @@
         border:1px solid #33291f;border-radius:6px;background:#1b1712;color:#e9e2d6;font:inherit}
       #valk-panel .vhist{max-height:120px;overflow-y:auto;font-size:10.5px}
       #valk-panel .vhist div{padding:2px 0;border-bottom:1px solid #221c15;color:#b9ad9c}
+      #valk-panel .vhistrow{cursor:pointer}
+      #valk-panel .vhistrow:hover{color:#e0a86b}
       #valk-panel .vmini{font-size:10px;color:#8a7c6a}
     `);
     panelEl = document.createElement("div");
@@ -781,7 +839,7 @@
       try { reason = JSON.parse(r.responseText).error || ""; } catch (e) {}
       if (r.status === 200 || r.status === 201) {
         res.textContent = `✅ Entré dans « ${raffle.name} »`;
-        recordEntry({ t: Date.now(), betInput: id, raffle: raffle.name, game: raffle.gameName, multi: null, status: "manuel" });
+        recordEntry({ t: Date.now(), betInput: id, raffleId, raffle: raffle.name, game: raffle.gameName, multi: null, status: "manuel" });
       } else if (r.status === 409) {
         res.textContent = "✅ Déjà dedans";
       } else {
@@ -797,11 +855,18 @@
     const list = panelEl.querySelector("#valk-hist-list");
     if (!list) return;
     if (!entries.length) { list.innerHTML = `<div class="vmini">Aucune entrée pour l'instant.</div>`; return; }
-    list.innerHTML = entries.slice(0, 12).map((e) => {
+    list.innerHTML = entries.slice(0, 12).map((e, i) => {
       const time = new Date(e.t).toLocaleString();
       const mult = e.multi != null ? ` ${e.multi}x` : "";
-      return `<div>${time} · ${e.raffle}<br><span class="vmini">${e.game || "?"}${mult} · ${e.betInput}</span></div>`;
+      return `<div class="vhistrow" data-idx="${i}" title="Ouvrir la page des raffles Valkyrie">${time} · ${e.raffle}<br><span class="vmini">${e.game || "?"}${mult} · ${e.betInput}</span></div>`;
     }).join("");
+    list.querySelectorAll(".vhistrow").forEach((row) => {
+      row.addEventListener("click", () => {
+        // Le format d'un lien direct vers UNE raffle n'est pas connu avec certitude :
+        // on ouvre donc la page générale des raffles Valkyrie, qui elle est sûre.
+        try { window.open(RAFFLES_PAGE_URL, "_blank"); } catch (e) {}
+      });
+    });
   }
 
   function exportEntries() {
