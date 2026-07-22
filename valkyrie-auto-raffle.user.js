@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Valkyrie Auto-Raffle (Stake → Valkyrie Studio)
 // @namespace    oracle-labs.valkyrie
-// @version      2.0.4
+// @version      2.0.5
 // @description  Capture les bets de ta session Stake et, quand le jeu + le multiplicateur correspondent à une raffle Valkyrie Studio, envoie automatiquement le bet dans la raffle.
 // @author       Oracle Labs
 // @match        https://stake.com/*
@@ -514,7 +514,10 @@
     const th = raffle.multiplierValue;
     const mode = raffle.multiplierMode || "min";
     if (mode === "max") return bet.multiplier <= th;
-    if (mode === "exact") return Math.abs(bet.multiplier - th) < 1e-9;
+    // Le mode "exact" accepte en réalité tout multiplicateur qui ARRONDIT au palier visé
+    // (ex. 49.55x, 50.25x, 50.45x sont tous acceptés par Valkyrie pour une raffle "50x exact"),
+    // pas une égalité stricte au chiffre près — confirmé par des bets acceptés manuellement.
+    if (mode === "exact") return Math.round(bet.multiplier) === Math.round(th);
     return bet.multiplier >= th;
   }
 
