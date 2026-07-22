@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Valkyrie Auto-Raffle (Stake → Valkyrie Studio)
 // @namespace    oracle-labs.valkyrie
-// @version      1.1.0
+// @version      1.2.0
 // @description  Capture les bets de ta session Stake et, quand le jeu + le multiplicateur correspondent à une raffle Valkyrie Studio, envoie automatiquement le bet dans la raffle.
 // @author       Oracle Labs
 // @match        https://stake.com/*
@@ -14,6 +14,8 @@
 // @grant        GM_setValue
 // @grant        GM_getValue
 // @grant        GM_addStyle
+// @grant        GM_notification
+// @grant        GM_setClipboard
 // @run-at       document-start
 // @noframes
 // @updateURL    https://raw.githubusercontent.com/tournament-wct/valkyrie-auto-raffle/main/valkyrie-auto-raffle.user.js
@@ -37,13 +39,17 @@
 
   const SUBMIT_DELAY_MS = 450;
   const RAFFLE_REFRESH_MS = 60000;
+  const ONLY_VALKYRIE_GAMES = true; // ne traiter que les bets dont le jeu a une raffle active
+  const NOTIFY_ON_ENTRY = true;     // notif navigateur + son quand un bet est ENTRÉ
   const LOG_PREFIX = "[Valkyrie AR]";
   const SENT_STORE_KEY = "valk_sent_pairs_v1";
+  const ENTRY_LOG_KEY = "valk_entries_v1";
   const MSG_MARK = "__valk_payload__";
 
   /* ======================= ÉTAT ======================= */
 
   let activeRaffles = [];
+  let targetGames = new Set(); // noms de jeux (normalisés) ayant une raffle active
   const seenBets = new Map();
   const submitQueue = [];
   let queueRunning = false;
@@ -58,6 +64,15 @@
     sentPairs.add(key);
     if (sentPairs.size > 5000) sentPairs = new Set([...sentPairs].slice(-3000));
     try { GM_setValue(SENT_STORE_KEY, JSON.stringify([...sentPairs])); } catch (e) {}
+  }
+
+  let entries = [];
+  try { entries = JSON.parse(GM_getValue(ENTRY_LOG_KEY, "[]")); } catch (e) { entries = []; }
+  function recordEntry(o) {
+    entries.unshift(o);
+    if (entries.length > 500) entries.length = 500;
+    try { GM_setValue(ENTRY_LOG_KEY, JSON.stringify(entries)); } catch (e) {}
+    renderHistory();
   }
 
   /* ======================= RÉSEAU (cross-origin via GM) ======================= */
@@ -85,8 +100,11 @@
       const data = JSON.parse(r.responseText);
       const list = Array.isArray(data) ? data : data.raffles || [];
       activeRaffles = list.filter((x) => (x.status || "active") === "active");
-      log(`✅ ${activeRaffles.length} raffle(s) active(s) chargée(s).`);
+      targetGames = new Set(activeRaffles.map((r) => norm(r.gameName)).filter(Boolean));
+      log(`✅ ${activeRaffles.length} raffle(s) active(s) — ${targetGames.size} jeu(x) suivis.`);
       updatePanel();
+      renderHunting();
+      populateManualRaffles();
     } catch (e) {
       log("⚠️ Impossible de charger les raffles Valkyrie : " + (e.message || e));
     }
@@ -95,6 +113,7 @@
   /* ======================= EXTRACTION DES BETS ======================= */
 
   function norm(s) { return String(s || "").toLowerCase().replace(/[^a-z0-9]/g, ""); }
+  function isTargetGame(name) { return !!name && targetGames.has(norm(name)); }
 
   function findGameContext(node, depth) {
     if (!node || typeof node !== "object" || depth > 7) return null;
@@ -117,8 +136,6 @@
 
   function looksLikeBetId(v) { return typeof v === "string" && /^(casino|sports|house|ext|sport):/i.test(v); }
 
-  // Valkyrie veut un id de forme "casino:NNNN" / "house:NNNN" (= l'iid), PAS l'UUID interne.
-  // Le bet est souvent emboîté : l'iid se trouve sur le nœud OU sur son parent (wrapper).
   function pickBetInput(node, parent) {
     if (looksLikeBetId(node.iid)) return node.iid;
     for (const k in node) if (looksLikeBetId(node[k])) return node[k];
@@ -160,22 +177,36 @@
     }
   }
 
-  function processPayload(obj) {
+  function processPayload(obj, url) {
     if (!obj || typeof obj !== "object") return;
 
     const g = findGameContext(obj, 0);
     if (g && g.name && (!currentGame || currentGame.name !== g.name)) {
       currentGame = g;
       updatePanel();
+      renderHunting();
     }
 
     const found = [];
     extractBets(obj, found, 0, null);
+
+    // Détection "liste de bets" (historique) : brique pour le futur rattrapage auto.
+    // Ces bets passent par handleBet() → donc ouvrir ton historique Stake les re-vérifie déjà.
+    if (found.length >= 4) {
+      const onTarget = found.filter((b) => isTargetGame(b.game || (currentGame && currentGame.name))).length;
+      log(`🔁 Liste de ${found.length} bets re-scannée (${onTarget} sur jeu(x) suivi(s)).`);
+    }
+
     for (const bet of found) handleBet(bet);
   }
 
   function handleBet(bet) {
     if (!bet.id) return;
+    if (!bet.game && currentGame && currentGame.name) bet.game = currentGame.name;
+
+    // Filtre "Valkyrie uniquement" : on ignore tout jeu sans raffle active.
+    if (ONLY_VALKYRIE_GAMES && targetGames.size && !isTargetGame(bet.game)) return;
+
     const prev = seenBets.get(bet.id);
     const isNew = !prev;
     const multiResolved = prev && (prev.multiplier === 0 || prev.multiplier == null) && bet.multiplier > 0;
@@ -184,7 +215,6 @@
       return;
     }
 
-    if (!bet.game && currentGame && currentGame.name) bet.game = currentGame.name;
     seenBets.set(bet.id, bet);
     if (isNew) stats.captured++;
     considerBet(bet);
@@ -199,10 +229,9 @@
     if (bet.multiplier == null || isNaN(bet.multiplier)) return false;
     const th = raffle.multiplierValue;
     const mode = raffle.multiplierMode || "min";
-    // La mise min (USD) n'est pas vérifiée ici : le serveur Valkyrie tranche.
     if (mode === "max") return bet.multiplier <= th;
     if (mode === "exact") return Math.abs(bet.multiplier - th) < 1e-9;
-    return bet.multiplier >= th; // "min"
+    return bet.multiplier >= th;
   }
 
   function considerBet(bet) {
@@ -238,6 +267,8 @@
       if (r.status === 200 || r.status === 201) {
         stats.sent++; rememberPair(key);
         log(`✅ ENTRÉ dans ${tag}`);
+        recordEntry({ t: Date.now(), betInput: input, raffle: raffle.name, game: bet.game, multi: bet.multiplier, status: "entré" });
+        notifyEntry(bet, raffle);
       } else if (r.status === 409) {
         stats.conflict++; rememberPair(key);
         log(`✅ Déjà dedans ${tag}`);
@@ -252,29 +283,62 @@
     updatePanel();
   }
 
+  /* ======================= NOTIF + SON ======================= */
+
+  function notifyEntry(bet, raffle) {
+    if (!NOTIFY_ON_ENTRY) return;
+    try {
+      GM_notification({
+        title: "🏴‍☠️ Bet entré dans une raffle !",
+        text: `${raffle.name}\n${bet.game} · ${bet.multiplier}x`,
+        timeout: 8000,
+      });
+    } catch (e) {}
+    beep();
+  }
+
+  function beep() {
+    try {
+      const ctx = new (window.AudioContext || window.webkitAudioContext)();
+      const now = ctx.currentTime;
+      [880, 1320].forEach((f, i) => {
+        const o = ctx.createOscillator(), g = ctx.createGain();
+        o.connect(g); g.connect(ctx.destination);
+        o.type = "sine"; o.frequency.value = f;
+        const t0 = now + i * 0.14;
+        g.gain.setValueAtTime(0.0001, t0);
+        g.gain.exponentialRampToValueAtTime(0.3, t0 + 0.02);
+        g.gain.exponentialRampToValueAtTime(0.0001, t0 + 0.13);
+        o.start(t0); o.stop(t0 + 0.14);
+      });
+    } catch (e) {}
+  }
+
   /* ======================= HOOK INJECTÉ DANS LA PAGE ======================= */
 
   function valkPageHook(MARK) {
-    function forward(text) {
+    function forward(text, url) {
       if (typeof text !== "string" || !text) return;
       if (text.indexOf("ultiplier") === -1 && text.indexOf("payout") === -1) return;
-      try { window.postMessage({ [MARK]: true, t: text }, "*"); } catch (e) {}
+      try { window.postMessage({ [MARK]: true, t: text, u: url || "" }, "*"); } catch (e) {}
     }
     try {
       var of = window.fetch;
-      if (of) window.fetch = function () {
+      if (of) window.fetch = function (input) {
+        var url = typeof input === "string" ? input : (input && input.url) || "";
         return of.apply(this, arguments).then(function (resp) {
-          try { resp.clone().text().then(forward).catch(function () {}); } catch (e) {}
+          try { resp.clone().text().then(function (t) { forward(t, url); }).catch(function () {}); } catch (e) {}
           return resp;
         });
       };
     } catch (e) {}
     try {
-      var os = XMLHttpRequest.prototype.send;
+      var oo = XMLHttpRequest.prototype.open, os = XMLHttpRequest.prototype.send;
+      XMLHttpRequest.prototype.open = function (m, u) { this.__vu = u; return oo.apply(this, arguments); };
       XMLHttpRequest.prototype.send = function () {
         var xhr = this;
         xhr.addEventListener("load", function () {
-          try { if (xhr.responseType === "" || xhr.responseType === "text") forward(xhr.responseText); } catch (e) {}
+          try { if (xhr.responseType === "" || xhr.responseType === "text") forward(xhr.responseText, xhr.__vu); } catch (e) {}
         });
         return os.apply(this, arguments);
       };
@@ -285,9 +349,9 @@
         var ws = protocols !== undefined ? new NativeWS(url, protocols) : new NativeWS(url);
         ws.addEventListener("message", function (ev) {
           var d = ev.data;
-          if (typeof d === "string") forward(d);
-          else if (typeof Blob !== "undefined" && d instanceof Blob) { d.text().then(forward).catch(function () {}); }
-          else if (d instanceof ArrayBuffer) { try { forward(new TextDecoder("utf-8").decode(d)); } catch (e) {} }
+          if (typeof d === "string") forward(d, url);
+          else if (typeof Blob !== "undefined" && d instanceof Blob) { d.text().then(function (t) { forward(t, url); }).catch(function () {}); }
+          else if (d instanceof ArrayBuffer) { try { forward(new TextDecoder("utf-8").decode(d), url); } catch (e) {} }
         });
         return ws;
       };
@@ -314,7 +378,7 @@
     stats.payloads++;
     let obj;
     try { obj = JSON.parse(data.t); } catch (err) { return; }
-    processPayload(obj);
+    processPayload(obj, data.u);
     updatePanel();
   }
 
@@ -324,7 +388,7 @@
 
   function buildPanel() {
     GM_addStyle(`
-      #valk-panel{position:fixed;bottom:14px;right:14px;z-index:2147483647;width:300px;
+      #valk-panel{position:fixed;bottom:14px;right:14px;z-index:2147483647;width:308px;
         background:#12100e;border:1px solid #33291f;border-radius:12px;color:#e9e2d6;
         font:12px/1.45 ui-monospace,Menlo,Consolas,monospace;box-shadow:0 8px 30px rgba(0,0,0,.5);overflow:hidden}
       #valk-panel .vh{display:flex;align-items:center;justify-content:space-between;
@@ -335,14 +399,24 @@
       #valk-panel .vgrid{display:grid;grid-template-columns:1fr auto;gap:3px 10px;margin-bottom:8px}
       #valk-panel .vgrid span{color:#8a7c6a}
       #valk-panel .vgrid b{color:#e9e2d6;font-weight:600;text-align:right}
-      #valk-panel .vlog{max-height:150px;overflow-y:auto;border-top:1px solid #33291f;padding-top:7px;
-        font-size:10.5px;color:#b9ad9c}
+      #valk-panel .vsec{margin:8px 0;border-top:1px solid #33291f;padding-top:8px}
+      #valk-panel .vlabel{color:#8a7c6a;margin-bottom:4px}
+      #valk-panel .vhunt div{color:#7fdca8;padding:1px 0}
+      #valk-panel .vhunt .miss{color:#8a7c6a}
+      #valk-panel .vlog{max-height:130px;overflow-y:auto;border-top:1px solid #33291f;padding-top:7px;
+        margin-top:8px;font-size:10.5px;color:#b9ad9c}
       #valk-panel .vlog div{padding:1px 0;word-break:break-word}
-      #valk-panel .vbtn{margin-top:8px;width:100%;padding:6px;border:1px solid #33291f;border-radius:7px;
+      #valk-panel .vrow{display:flex;gap:8px;margin-top:8px}
+      #valk-panel .vbtn{flex:1;padding:6px;border:1px solid #33291f;border-radius:7px;
         background:#1b1712;color:#e9e2d6;cursor:pointer;font:inherit}
       #valk-panel .vbtn:hover{border-color:#e0a86b}
-      #valk-panel .vrow{display:flex;gap:8px}
-      #valk-panel .vrow .vbtn{flex:1;width:auto}
+      #valk-panel .vpanel{margin-top:8px;padding:8px;border:1px solid #33291f;border-radius:8px;background:#0f0d0b}
+      #valk-panel .vpanel[hidden]{display:none}
+      #valk-panel input,#valk-panel select{width:100%;box-sizing:border-box;margin-bottom:6px;padding:6px;
+        border:1px solid #33291f;border-radius:6px;background:#1b1712;color:#e9e2d6;font:inherit}
+      #valk-panel .vhist{max-height:120px;overflow-y:auto;font-size:10.5px}
+      #valk-panel .vhist div{padding:2px 0;border-bottom:1px solid #221c15;color:#b9ad9c}
+      #valk-panel .vmini{font-size:10px;color:#8a7c6a}
     `);
     panelEl = document.createElement("div");
     panelEl.id = "valk-panel";
@@ -358,10 +432,28 @@
           <span>Entrés ✅</span><b data-k="entered">0</b>
           <span>Refusés ⛔</span><b data-k="refused">0</b>
         </div>
+        <div class="vsec">
+          <div class="vlabel">🎯 Sur ce jeu, tu vises :</div>
+          <div class="vhunt" id="valk-hunt"><span class="miss">—</span></div>
+        </div>
         <div class="vlog"></div>
         <div class="vrow">
           <button class="vbtn" data-act="pause">⏸ Pause</button>
-          <button class="vbtn" data-act="reset">↺ Reset stats</button>
+          <button class="vbtn" data-act="reset">↺ Reset</button>
+        </div>
+        <div class="vrow">
+          <button class="vbtn" data-act="manual">✍️ Saisie manuelle</button>
+          <button class="vbtn" data-act="history">📋 Historique</button>
+        </div>
+        <div class="vpanel" id="valk-manual" hidden>
+          <input id="valk-manual-id" placeholder="colle un bet id (ex: casino:123…)" />
+          <select id="valk-manual-raffle"></select>
+          <button class="vbtn" data-act="manual-send" style="width:100%">Envoyer à la raffle</button>
+          <div id="valk-manual-res" class="vmini" style="margin-top:6px"></div>
+        </div>
+        <div class="vpanel" id="valk-history" hidden>
+          <div class="vhist" id="valk-hist-list"></div>
+          <button class="vbtn" data-act="export" style="width:100%;margin-top:6px">📤 Exporter (presse-papier)</button>
         </div>
       </div>`;
     document.body.appendChild(panelEl);
@@ -382,7 +474,19 @@
       updatePanel();
       log("↺ Stats remises à zéro.");
     });
+    panelEl.querySelector('[data-act="manual"]').addEventListener("click", () => {
+      const p = panelEl.querySelector("#valk-manual"); p.hidden = !p.hidden;
+    });
+    panelEl.querySelector('[data-act="history"]').addEventListener("click", () => {
+      const p = panelEl.querySelector("#valk-history"); p.hidden = !p.hidden;
+      if (!p.hidden) renderHistory();
+    });
+    panelEl.querySelector('[data-act="manual-send"]').addEventListener("click", manualSend);
+    panelEl.querySelector('[data-act="export"]').addEventListener("click", exportEntries);
+
     makeDraggable(panelEl, panelEl.querySelector(".vh"));
+    populateManualRaffles();
+    renderHunting();
     updatePanel();
   }
 
@@ -400,6 +504,83 @@
       el.style.right = "auto"; el.style.bottom = "auto";
     });
     window.addEventListener("mouseup", () => (drag = false));
+  }
+
+  function modeSymbol(raffle) {
+    const m = raffle.multiplierMode || "min";
+    return m === "max" ? "≤" : m === "exact" ? "=" : "≥";
+  }
+
+  function renderHunting() {
+    if (!panelEl) return;
+    const el = panelEl.querySelector("#valk-hunt");
+    if (!el) return;
+    if (!currentGame || !currentGame.name) { el.innerHTML = `<span class="miss">— (joue pour détecter le jeu)</span>`; return; }
+    const cg = norm(currentGame.name);
+    const matching = activeRaffles.filter((r) => norm(r.gameName) === cg);
+    if (!matching.length) { el.innerHTML = `<span class="miss">${currentGame.name} — aucune raffle</span>`; return; }
+    el.innerHTML = matching
+      .map((r) => `<div>${modeSymbol(r)} ${r.multiplierValue}x — ${r.name}</div>`)
+      .join("");
+  }
+
+  function populateManualRaffles() {
+    if (!panelEl) return;
+    const sel = panelEl.querySelector("#valk-manual-raffle");
+    if (!sel) return;
+    const cur = sel.value;
+    sel.innerHTML = `<option value="">— choisir une raffle —</option>` +
+      activeRaffles.map((r) => `<option value="${r.id}">${r.name} · ${r.gameName}</option>`).join("");
+    if (activeRaffles.some((r) => r.id === cur)) sel.value = cur;
+  }
+
+  async function manualSend() {
+    const idEl = panelEl.querySelector("#valk-manual-id");
+    const selEl = panelEl.querySelector("#valk-manual-raffle");
+    const res = panelEl.querySelector("#valk-manual-res");
+    const id = idEl.value.trim();
+    const raffleId = selEl.value;
+    if (!id) { res.textContent = "Colle un bet id."; return; }
+    if (!raffleId) { res.textContent = "Choisis une raffle."; return; }
+    const raffle = activeRaffles.find((r) => r.id === raffleId);
+    res.textContent = "Envoi…";
+    try {
+      const r = await gmPost(ENTER_API, { raffleId, betInput: id });
+      let reason = "";
+      try { reason = JSON.parse(r.responseText).error || ""; } catch (e) {}
+      if (r.status === 200 || r.status === 201) {
+        res.textContent = `✅ Entré dans « ${raffle.name} »`;
+        recordEntry({ t: Date.now(), betInput: id, raffle: raffle.name, game: raffle.gameName, multi: null, status: "manuel" });
+      } else if (r.status === 409) {
+        res.textContent = "✅ Déjà dedans";
+      } else {
+        res.textContent = "⛔ " + (reason || "HTTP " + r.status);
+      }
+    } catch (e) {
+      res.textContent = "⛔ " + (e.message || e);
+    }
+  }
+
+  function renderHistory() {
+    if (!panelEl) return;
+    const list = panelEl.querySelector("#valk-hist-list");
+    if (!list) return;
+    if (!entries.length) { list.innerHTML = `<div class="vmini">Aucune entrée pour l'instant.</div>`; return; }
+    list.innerHTML = entries.slice(0, 12).map((e) => {
+      const time = new Date(e.t).toLocaleString();
+      const mult = e.multi != null ? ` ${e.multi}x` : "";
+      return `<div>${time} · ${e.raffle}<br><span class="vmini">${e.game || "?"}${mult} · ${e.betInput}</span></div>`;
+    }).join("");
+  }
+
+  function exportEntries() {
+    try {
+      GM_setClipboard(JSON.stringify(entries, null, 2), "text");
+      log(`📤 ${entries.length} entrée(s) copiée(s) dans le presse-papier.`);
+    } catch (e) {
+      console.log(LOG_PREFIX, "export :", JSON.stringify(entries));
+      log("📤 Export dans la console (presse-papier indispo).");
+    }
   }
 
   function updatePanel() {
@@ -442,8 +623,9 @@
   else start();
 
   window.__valk = {
-    stats, seenBets,
+    stats, seenBets, entries,
     currentGame: () => currentGame,
+    targetGames: () => [...targetGames],
     activeRaffles: () => activeRaffles,
     dumpBets: () => console.table([...seenBets.values()]),
     reloadRaffles: loadActiveRaffles,
