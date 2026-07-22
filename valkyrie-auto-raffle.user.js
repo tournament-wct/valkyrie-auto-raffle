@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Valkyrie Auto-Raffle (Stake → Valkyrie Studio)
 // @namespace    oracle-labs.valkyrie
-// @version      1.0.0
+// @version      1.1.0
 // @description  Capture les bets de ta session Stake et, quand le jeu + le multiplicateur correspondent à une raffle Valkyrie Studio, envoie automatiquement le bet dans la raffle.
 // @author       Oracle Labs
 // @match        https://stake.com/*
@@ -341,6 +341,8 @@
       #valk-panel .vbtn{margin-top:8px;width:100%;padding:6px;border:1px solid #33291f;border-radius:7px;
         background:#1b1712;color:#e9e2d6;cursor:pointer;font:inherit}
       #valk-panel .vbtn:hover{border-color:#e0a86b}
+      #valk-panel .vrow{display:flex;gap:8px}
+      #valk-panel .vrow .vbtn{flex:1;width:auto}
     `);
     panelEl = document.createElement("div");
     panelEl.id = "valk-panel";
@@ -357,7 +359,10 @@
           <span>Refusés ⛔</span><b data-k="refused">0</b>
         </div>
         <div class="vlog"></div>
-        <button class="vbtn" data-act="pause">⏸ Mettre en pause</button>
+        <div class="vrow">
+          <button class="vbtn" data-act="pause">⏸ Pause</button>
+          <button class="vbtn" data-act="reset">↺ Reset stats</button>
+        </div>
       </div>`;
     document.body.appendChild(panelEl);
     logEl = panelEl.querySelector(".vlog");
@@ -368,8 +373,14 @@
     });
     panelEl.querySelector('[data-act="pause"]').addEventListener("click", (e) => {
       paused = !paused;
-      e.target.textContent = paused ? "▶ Reprendre" : "⏸ Mettre en pause";
+      e.target.textContent = paused ? "▶ Reprendre" : "⏸ Pause";
       if (!paused) runQueue();
+    });
+    panelEl.querySelector('[data-act="reset"]').addEventListener("click", () => {
+      stats.payloads = 0; stats.captured = 0; stats.matched = 0;
+      stats.sent = 0; stats.conflict = 0; stats.failed = 0;
+      updatePanel();
+      log("↺ Stats remises à zéro.");
     });
     makeDraggable(panelEl, panelEl.querySelector(".vh"));
     updatePanel();
