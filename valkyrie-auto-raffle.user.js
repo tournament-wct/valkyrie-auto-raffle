@@ -40,7 +40,7 @@
   /* ======================= CONFIG ======================= */
 
   // Passe à false UNIQUEMENT quand la capture est validée sur du réel.
-  const DRY_RUN = true;
+  const DRY_RUN = false;
 
   const VALKYRIE_BASE = "https://valkyriestudio.gg";
   const RAFFLES_API = VALKYRIE_BASE + "/api/raffles";
