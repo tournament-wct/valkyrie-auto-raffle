@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Valkyrie Auto-Raffle (Stake → Valkyrie Studio)
 // @namespace    oracle-labs.valkyrie
-// @version      2.0.3
+// @version      2.0.4
 // @description  Capture les bets de ta session Stake et, quand le jeu + le multiplicateur correspondent à une raffle Valkyrie Studio, envoie automatiquement le bet dans la raffle.
 // @author       Oracle Labs
 // @match        https://stake.com/*
@@ -428,14 +428,21 @@
     }
 
     if (batch) {
-      const onTarget = found.filter((b) => isTargetGame(b.game || mostRecentGameName())).length;
-      log(`🔁 Lot de ${found.length} bets (feed public probable) — ${onTarget} sur jeu(x) suivi(s), filtrés à l'identité.`);
+      // Ces feeds publics ("Tous les paris"/"Gros parieurs") se rafraîchissent très souvent —
+      // on limite ce log à une fois par minute max pour ne pas noyer la console.
+      const now = Date.now();
+      if (!lastBatchLogAt || now - lastBatchLogAt > 60000) {
+        lastBatchLogAt = now;
+        const onTarget = found.filter((b) => isTargetGame(b.game || mostRecentGameName())).length;
+        log(`🔁 Lot de ${found.length} bets (feed public probable) — ${onTarget} sur jeu(x) suivi(s), filtrés à l'identité.`);
+      }
     }
 
     for (const bet of found) handleBet(bet, batch);
   }
 
   let batchIdDebugSamples = 0;
+  let lastBatchLogAt = 0;
   function handleBet(bet, fromBatch) {
     if (!bet.id) return;
     if (!bet.game) { const rg = mostRecentGameName(); if (rg) bet.game = rg; }
@@ -444,9 +451,11 @@
     // (pas de garde sur targetGames.size : tant que les raffles ne sont pas chargées,
     //  rien n'est envoyable de toute façon, donc on peut ignorer sans risque.)
     if (ONLY_VALKYRIE_GAMES && !isTargetGame(bet.game)) {
-      // Jeu totalement inconnu (jamais vu de contexte) : on le signale, car c'est le seul
-      // cas où un bet légitime pourrait passer à la trappe silencieusement.
-      if (!bet.game) {
+      // Jeu totalement inconnu (jamais vu de contexte) : on le signale, MAIS seulement pour un
+      // bet ISOLÉ (probablement le tien) — pour un bet issu d'un LOT (feed public "Tous les
+      // paris"/"Gros parieurs", qui se rafraîchit très souvent), ça n'a aucun intérêt : ce bet
+      // est de toute façon filtré par l'identité, connaître son jeu ne changerait rien.
+      if (!bet.game && !fromBatch) {
         stats.unknownGame++;
         if (stats.unknownGame <= 5 || stats.unknownGame % 20 === 0) {
           log(`❓ Bet ignoré : jeu inconnu (aucun contexte de jeu détecté pour l'instant).`);
