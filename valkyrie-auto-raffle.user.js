@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Valkyrie Auto-Raffle (Stake → Valkyrie Studio)
 // @namespace    oracle-labs.valkyrie
-// @version      1.8.1
+// @version      1.8.2
 // @description  Capture les bets de ta session Stake et, quand le jeu + le multiplicateur correspondent à une raffle Valkyrie Studio, envoie automatiquement le bet dans la raffle.
 // @author       Oracle Labs
 // @match        https://stake.com/*
@@ -46,8 +46,6 @@
   const RAFFLES_PAGE_URL = "https://valkyriestudio.gg/raffles"; // page publique (format des liens par raffle inconnu)
   const NOTIFY_NEW_RAFFLE = true;   // alerte quand une nouvelle raffle apparaît
   const NOTIFY_WINS = true;         // alerte quand une raffle où tu es entré est tirée et que tu gagnes
-  // Champs présents uniquement sur TON user (pas sur les users publics des feeds) : sert à détecter ton compte.
-  const SELF_MARKERS = ["email", "balances", "vaultBalances", "vaultBalance", "kycStatus", "mfaEnabled", "hasVerifiedEmail", "activeClientSeed", "sessionCount"];
   const LOG_PREFIX = "[Valkyrie AR]";
   const SENT_STORE_KEY = "valk_sent_pairs_v1";
   const ENTRY_LOG_KEY = "valk_entries_v1";
@@ -261,18 +259,38 @@
     return null;
   }
 
-  // Détecte TON compte : cherche un objet "user" qui porte des champs privés (solde, email…)
-  // que seul ton propre user expose — jamais les users publics affichés dans les feeds.
+  // Détecte TON compte : cherche un objet "user" qui porte des champs privés (solde, email,
+  // vérifications…) que seul ton propre user expose — jamais les users publics des feeds.
+  // On matche par MOTIF sur le nom des champs (regex) plutôt que des noms exacts figés,
+  // car on ne connaît pas avec certitude le nom exact utilisé par l'API de Stake.
+  const PRIVATE_FIELD_PATTERN = /email|balance|vault|kyc|mfa|twofactor|two_factor|verified|session|withdraw|deposit|referral|affiliate|phone|clientseed/i;
+  function hasPrivateMarker(node) {
+    return Object.keys(node).some((k) => PRIVATE_FIELD_PATTERN.test(k));
+  }
+  function selfNameOf(node) {
+    if (typeof node.username === "string" && node.username) return node.username;
+    if (typeof node.name === "string" && node.name) return node.name;
+    return null;
+  }
+  let selfDebugSamples = 0;
   function detectSelf(node, depth) {
     if (!node || typeof node !== "object" || depth > 7) return null;
     if (Array.isArray(node)) {
       for (const it of node) { const s = detectSelf(it, depth + 1); if (s) return s; }
       return null;
     }
-    const hasMarker = SELF_MARKERS.some((m) => m in node);
-    if (hasMarker && typeof node.name === "string" && node.name) return node.name;
-    if (node.user && typeof node.user === "object" && typeof node.user.name === "string" &&
-        SELF_MARKERS.some((m) => m in node.user)) return node.user.name;
+    const nm = selfNameOf(node);
+    if (nm && hasPrivateMarker(node)) return nm;
+    if (node.user && typeof node.user === "object") {
+      const un = selfNameOf(node.user);
+      if (un && hasPrivateMarker(node.user)) return un;
+    }
+    // Diagnostic : objet qui ressemble à un profil (a un nom) mais sans marqueur privé détecté —
+    // aide à ajuster PRIVATE_FIELD_PATTERN si la détection ne se déclenche toujours pas.
+    if (nm && selfDebugSamples < 5 && Object.keys(node).length >= 4) {
+      selfDebugSamples++;
+      console.log(`${LOG_PREFIX} 🔍 objet avec nom "${nm}" mais aucun marqueur privé reconnu — champs :`, Object.keys(node));
+    }
     for (const k in node) {
       const v = node[k];
       if (v && typeof v === "object") { const s = detectSelf(v, depth + 1); if (s) return s; }
