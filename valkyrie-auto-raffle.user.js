@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Valkyrie Auto-Raffle (Stake → Valkyrie Studio)
 // @namespace    oracle-labs.valkyrie
-// @version      1.8.2
+// @version      1.9.0
 // @description  Capture les bets de ta session Stake et, quand le jeu + le multiplicateur correspondent à une raffle Valkyrie Studio, envoie automatiquement le bet dans la raffle.
 // @author       Oracle Labs
 // @match        https://stake.com/*
@@ -68,7 +68,10 @@
   let queueRunning = false;
   let paused = false;
   const recentGames = new Map(); // normName -> { name, slug, t } : jeux Valkyrie actifs récemment
-  let myUsername = null; // détecté depuis ta session ; null = pas encore connu (on ne filtre pas)
+  let myUsername = null; // détecté automatiquement (peut se tromper — voir override ci-dessous)
+  let manualUsername = null; // réglé à la main dans le panneau : TOUJOURS prioritaire sur la détection auto
+  try { manualUsername = GM_getValue("valk_manual_username", null) || null; } catch (e) {}
+  function effectiveUsername() { return manualUsername || myUsername; }
 
   const VOL_LEVELS = [1, 0.35, 0]; // fort → bas → muet
   let notifVolume = 1;
@@ -177,8 +180,8 @@
   // Vérifie si l'une de tes entrées a gagné, en comparant les gagnants des raffles tirées
   // à ton pseudo détecté. On ne re-vérifie jamais deux fois la même raffle une fois traitée.
   function checkWins() {
-    if (!NOTIFY_WINS || !myUsername || !drawnRaffles.length) return;
-    const my = norm(myUsername);
+    if (!NOTIFY_WINS || !effectiveUsername() || !drawnRaffles.length) return;
+    const my = norm(effectiveUsername());
     for (const raffle of drawnRaffles) {
       if (notifiedWinIds.has(raffle.id)) continue;
       notifiedWinIds.add(raffle.id);
@@ -264,8 +267,15 @@
   // On matche par MOTIF sur le nom des champs (regex) plutôt que des noms exacts figés,
   // car on ne connaît pas avec certitude le nom exact utilisé par l'API de Stake.
   const PRIVATE_FIELD_PATTERN = /email|balance|vault|kyc|mfa|twofactor|two_factor|verified|session|withdraw|deposit|referral|affiliate|phone|clientseed/i;
+  // Objets à écarter d'office : un contact/hôte VIP, un agent support… peut porter un "name"
+  // et un champ qui ressemble à un marqueur privé (ex. un email de contact) sans être TOI.
+  const SELF_EXCLUDE_PATTERN = /\bhost\b|agent|support|representative|manager|assistant/i;
   function hasPrivateMarker(node) {
-    return Object.keys(node).some((k) => PRIVATE_FIELD_PATTERN.test(k));
+    if (SELF_EXCLUDE_PATTERN.test(Object.keys(node).join(" "))) return false;
+    // On exige AU MOINS 2 marqueurs distincts : un seul champ qui matche par coïncidence
+    // (ex. l'email d'un contact VIP) ne suffit plus à te faire passer pour quelqu'un d'autre.
+    const hits = Object.keys(node).filter((k) => PRIVATE_FIELD_PATTERN.test(k));
+    return hits.length >= 2;
   }
   function selfNameOf(node) {
     if (typeof node.username === "string" && node.username) return node.username;
@@ -348,9 +358,9 @@
   function processPayload(obj, url) {
     if (!obj || typeof obj !== "object") return;
 
-    if (!myUsername) {
+    if (!manualUsername && !myUsername) {
       const self = detectSelf(obj, 0);
-      if (self) { myUsername = self; log(`👤 Compte détecté : ${myUsername} — seuls tes bets seront traités.`); updatePanel(); }
+      if (self) { myUsername = self; log(`👤 Compte détecté automatiquement : ${myUsername} (vérifie que c'est bien toi, ou règle-le à la main).`); updatePanel(); }
     }
 
     const g = findGameContext(obj, 0);
@@ -400,7 +410,7 @@
 
     // Filtre "tes bets uniquement" : on ignore les bets attribués à un autre joueur
     // (vus dans les feeds). Tant que ton compte n'est pas connu, on ne bloque rien.
-    if (ONLY_OWN_BETS && myUsername && bet.user && norm(bet.user) !== norm(myUsername)) {
+    if (ONLY_OWN_BETS && effectiveUsername() && bet.user && norm(bet.user) !== norm(effectiveUsername())) {
       stats.foreign++;
       updatePanel();
       return;
@@ -622,6 +632,8 @@
       #valk-panel .vlog,#valk-panel .vhist,#valk-panel input,#valk-panel #valk-manual-res{user-select:text}
       #valk-panel .vgrid{display:grid;grid-template-columns:1fr auto;gap:3px 10px;margin-bottom:8px}
       #valk-panel .vgrid span{color:#8a7c6a}
+      #valk-panel .vedit{cursor:pointer;color:#e0a86b;margin-left:4px}
+      #valk-panel .vedit:hover{text-decoration:underline}
       #valk-panel .vgrid b{color:#e9e2d6;font-weight:600;text-align:right}
       #valk-panel .vsec{margin:8px 0;border-top:1px solid #33291f;padding-top:8px}
       #valk-panel .vlabel{color:#8a7c6a;margin-bottom:4px}
@@ -653,7 +665,7 @@
       <div class="vbody">
         <div class="vgrid">
           <span>Raffles actives</span><b data-k="raffles">—</b>
-          <span>Ton compte</span><b data-k="me">—</b>
+          <span>Ton compte <span class="vedit" data-act="edit-username" title="Régler ton pseudo manuellement">✎</span></span><b data-k="me">—</b>
           <span>Jeu courant</span><b data-k="game">—</b>
           <span>Trafic réseau</span><b data-k="payloads">0</b>
           <span>Bets capturés</span><b data-k="captured">0</b>
@@ -733,6 +745,19 @@
     panelEl.querySelector('[data-act="export"]').addEventListener("click", exportEntries);
 
     // Interrupteur on/off persistant
+    panelEl.querySelector('[data-act="edit-username"]').addEventListener("click", () => {
+      const current = manualUsername || myUsername || "";
+      const val = window.prompt(
+        "Ton pseudo Stake exact (utilisé pour ne traiter QUE tes bets et détecter tes gains) :",
+        current
+      );
+      if (val === null) return; // annulé
+      manualUsername = val.trim() || null;
+      try { GM_setValue("valk_manual_username", manualUsername); } catch (e) {}
+      updatePanel();
+      log(manualUsername ? `✎ Pseudo réglé manuellement : ${manualUsername}` : "✎ Pseudo manuel effacé — retour à la détection automatique.");
+    });
+
     panelEl.querySelector('[data-act="power"]').addEventListener("click", () => {
       enabled = !enabled;
       try { GM_setValue("valk_enabled", enabled); } catch (e) {}
@@ -809,7 +834,7 @@
     handle.addEventListener("mousedown", (e) => {
       // On peut attraper le panneau n'importe où, SAUF sur un élément interactif ou sur les
       // zones de texte à copier (journal, historique) — sinon la sélection déclenche le déplacement.
-      if (e.target.closest && e.target.closest("button, input, select, textarea, option, a, .vx, .vlog, .vhist")) return;
+      if (e.target.closest && e.target.closest("button, input, select, textarea, option, a, .vx, .vlog, .vhist, .vedit")) return;
       drag = true; sx = e.clientX; sy = e.clientY;
       const r = el.getBoundingClientRect(); ox = r.left; oy = r.top; e.preventDefault();
     });
@@ -930,7 +955,7 @@
     if (!panelEl) return;
     const set = (k, v) => { const n = panelEl.querySelector(`[data-k="${k}"]`); if (n) n.textContent = v; };
     set("raffles", activeRaffles.length || "—");
-    set("me", myUsername || "—");
+    set("me", manualUsername ? `${manualUsername} 🔒` : (myUsername || "—"));
     const games = activeGames();
     set("game", games.length ? games.map((g) => g.name).join(" + ") : "—");
     set("payloads", stats.payloads);
@@ -976,6 +1001,7 @@
     currentGame: () => activeGames(),
     activeGames: () => activeGames(),
     lastKnownGame: () => lastKnownGame,
+    effectiveUsername: () => effectiveUsername(),
     targetGames: () => [...targetGames],
     activeRaffles: () => activeRaffles,
     dumpBets: () => console.table([...seenBets.values()]),
