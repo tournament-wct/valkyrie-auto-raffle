@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Valkyrie Auto-Raffle (Stake → Valkyrie Studio)
 // @namespace    oracle-labs.valkyrie
-// @version      1.5.1
+// @version      1.5.2
 // @description  Capture les bets de ta session Stake et, quand le jeu + le multiplicateur correspondent à une raffle Valkyrie Studio, envoie automatiquement le bet dans la raffle.
 // @author       Oracle Labs
 // @match        https://stake.com/*
@@ -477,6 +477,8 @@
       #valk-panel .vh .vx{cursor:pointer;color:#8a7c6a;padding:0 4px}
       #valk-panel .vbody{padding:10px 11px;cursor:move}
       #valk-panel input,#valk-panel select,#valk-panel .vlog,#valk-panel .vhist{cursor:auto}
+      #valk-panel{user-select:none}
+      #valk-panel .vlog,#valk-panel .vhist,#valk-panel input,#valk-panel #valk-manual-res{user-select:text}
       #valk-panel .vgrid{display:grid;grid-template-columns:1fr auto;gap:3px 10px;margin-bottom:8px}
       #valk-panel .vgrid span{color:#8a7c6a}
       #valk-panel .vgrid b{color:#e9e2d6;font-weight:600;text-align:right}
@@ -577,9 +579,9 @@
   function makeDraggable(el, handle) {
     let sx, sy, ox, oy, drag = false;
     handle.addEventListener("mousedown", (e) => {
-      // On peut attraper le panneau n'importe où, SAUF sur un élément interactif
-      // (bouton, champ, liste déroulante, bouton de réduction), pour ne pas gêner clic/saisie.
-      if (e.target.closest && e.target.closest("button, input, select, textarea, option, a, .vx")) return;
+      // On peut attraper le panneau n'importe où, SAUF sur un élément interactif ou sur les
+      // zones de texte à copier (journal, historique) — sinon la sélection déclenche le déplacement.
+      if (e.target.closest && e.target.closest("button, input, select, textarea, option, a, .vx, .vlog, .vhist")) return;
       drag = true; sx = e.clientX; sy = e.clientY;
       const r = el.getBoundingClientRect(); ox = r.left; oy = r.top; e.preventDefault();
     });
